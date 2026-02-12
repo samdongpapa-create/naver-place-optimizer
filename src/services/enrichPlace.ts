@@ -58,12 +58,21 @@ export class NaverPlaceCrawler {
     // 객체
     if (typeof node === 'object') {
       // ✅ keywordList: [{text:"..."}, ...]
-      if (Array.isArray(node.keywordList) && acc.keywords.length === 0) {
-        const list = node.keywordList
-          .map((k: any) => (k?.text || k?.name || '').toString().trim())
-          .filter(Boolean);
-        if (list.length) acc.keywords = Array.from(new Set(list)).slice(0, 5);
-      }
+      if (Array.isArray((node as any).keywordList) && acc.keywords.length === 0) {
+  const rawList: any[] = (node as any).keywordList;
+
+  const list: string[] = rawList
+    .map((k: any) => {
+      const v = k?.text ?? k?.name ?? '';
+      return String(v).trim();
+    })
+    .filter((x: string) => x.length > 0);
+
+  if (list.length) {
+    acc.keywords = Array.from(new Set<string>(list)).slice(0, 5);
+  }
+}
+
 
       // ✅ 리뷰 카운트 후보들(네이버 응답 구조가 다양해서 넓게)
       const reviewCandidates: any[] = [
