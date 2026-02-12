@@ -2,8 +2,8 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import path from 'path';
 import dotenv from 'dotenv';
-import { NaverPlaceCrawler } from './services/enrichPlace';
-import { PlaceDiagnosisService } from './services/diagnosis';
+import { NaverPlaceCrawler, Plan } from './services/enrichPlace';
+import { DiagnosisService } from './services/diagnosis';
 import { convertToMobileUrl, isValidPlaceUrl } from './utils/urlHelper';
 
 dotenv.config();
@@ -18,7 +18,42 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 // Services
 const crawler = new NaverPlaceCrawler();
-const diagnosisService = new PlaceDiagnosisService();
+const diagnosisService = new DiagnosisService();
+
+function classifyIndustryFromUrl(mobileUrl: string): { vertical: string; subcategory: string } {
+  const m = mobileUrl.match(/m\.place\.naver\.com\/(\w+)\//);
+  const subcategory = m?.[1] || 'place';
+  let vertical = 'other';
+  if (subcategory.includes('hair') || subcategory.includes('beauty')) vertical = 'beauty';
+  if (subcategory.includes('restaurant') || subcategory.includes('cafe') || subcategory.includes('food')) vertical = 'food';
+  if (subcategory.includes('hotel') || subcategory.includes('accommodation')) vertical = 'travel';
+  return { vertical, subcategory };
+}
+
+function applyPlan(report: any, plan: Plan) {
+  if (plan === 'pro') return report;
+
+  // free: 개선안/추천키워드/경쟁사 일부를 블랭크 처리
+  if (report?.improvements) {
+    if (report.improvements.description) report.improvements.description = '🔒 유료 리포트에서 전체 문구를 제공합니다';
+    if (report.improvements.directions) report.improvements.directions = '🔒 유료 리포트에서 전체 문구를 제공합니다';
+    if (Array.isArray(report.improvements.keywords) && report.improvements.keywords.length) {
+      report.improvements.keywords = report.improvements.keywords.map(() => '🔒');
+    }
+    if (report.improvements.reviewGuidance) report.improvements.reviewGuidance = '🔒 유료 리포트에서 제공합니다';
+    if (report.improvements.photoGuidance) report.improvements.photoGuidance = '🔒 유료 리포트에서 제공합니다';
+  }
+  if (Array.isArray(report?.recommendedKeywords) && report.recommendedKeywords.length) {
+    report.recommendedKeywords = report.recommendedKeywords.map(() => '🔒');
+  }
+  if (Array.isArray(report?.competitors) && report.competitors.length) {
+    report.competitors = report.competitors.map((c: any) => ({
+      ...c,
+      keywords: Array.isArray(c.keywords) ? c.keywords.map(() => '🔒') : []
+    }));
+  }
+  return report;
+}
 
 // 서버 시작 시 브라우저 초기화
 (async () => {
@@ -35,148 +70,148 @@ app.get('/api/health', (req: Request, res: Response) => {
   res.json({ status: 'ok', message: 'Server is running' });
 });
 
-// 무료 진단 API
-app.post('/api/diagnose/free', async (req: Request, res: Response) => {
+// ✅ 통합 분석 API (권장)
+// POST /api/analyze
+// body: { input: { placeUrl }, options: { plan: 'free'|'pro', searchQuery? } }
+app.post('/api/analyze', async (req: Request, res: Response) => {
   try {
-    let { placeUrl } = req.body;
+    const placeUrl: string = req.body?.input?.placeUrl || req.body?.placeUrl;
+    const plan: Plan = (req.body?.options?.plan || req.body?.plan || 'free') as Plan;
+    const searchQuery: string | undefined = req.body?.options?.searchQuery || req.body?.searchQuery;
 
     if (!placeUrl) {
       return res.status(400).json({ error: '플레이스 URL을 입력해주세요' });
     }
 
-    console.log('📥 원본 URL:', placeUrl);
-
-    // URL 검증
     if (!isValidPlaceUrl(placeUrl)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: '올바른 네이버 플레이스 URL을 입력해주세요',
         message: '예시: https://map.naver.com/p/entry/place/1234567890'
       });
     }
 
-    // 모바일 URL로 변환
-    placeUrl = convertToMobileUrl(placeUrl);
-    console.log('🔄 변환된 URL:', placeUrl);
+    const mobileUrl = convertToMobileUrl(placeUrl);
 
-    // 플레이스 정보 크롤링
-    console.log('🔍 플레이스 정보 수집 시작...');
-    const placeData = await crawler.enrichPlace(placeUrl);
-    
-    console.log('✅ 수집 완료:');
-    console.log('  - 이름:', placeData.name);
-    console.log('  - 주소:', placeData.address);
-    console.log('  - 리뷰:', placeData.reviewCount);
-    console.log('  - 사진:', placeData.photoCount);
-    console.log('  - 설명 길이:', placeData.description.length);
-    console.log('  - 오시는길 길이:', placeData.directions.length);
-    console.log('  - 키워드:', placeData.keywords);
+    console.log('🔍 분석 시작:', { plan, mobileUrl });
+    const { place, debug } = await crawler.enrichPlace(mobileUrl);
 
-    // 진단 실행
-    console.log('📊 진단 시작...');
-    const diagnosis = diagnosisService.generateDiagnosis(placeData, false);
-    console.log('✅ 진단 완료');
+    const isPaid = plan === 'pro';
+    const diagnosisRaw = diagnosisService.generateDiagnosis(place, isPaid);
 
-    res.json({
-      success: true,
-      data: diagnosis
-    });
-
-  } catch (error: any) {
-    console.error('❌ 진단 오류:', error);
-    
-    let errorMessage = '진단 중 오류가 발생했습니다.';
-    
-    if (error.message.includes('iframe')) {
-      errorMessage = '페이지 로딩에 실패했습니다. URL을 다시 확인해주세요.';
-    } else if (error.message.includes('Timeout')) {
-      errorMessage = '페이지 로딩 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.';
-    } else if (error.message.includes('navigation')) {
-      errorMessage = '네이버 플레이스 페이지에 접근할 수 없습니다. URL을 확인해주세요.';
+    // pro + searchQuery 있으면 경쟁사
+    if (isPaid && searchQuery) {
+      try {
+        const competitors = await crawler.searchCompetitors(searchQuery, 5);
+        diagnosisRaw.competitors = competitors;
+      } catch (e) {
+        console.error('경쟁사 분석 오류:', e);
+      }
     }
-    
-    res.status(500).json({ 
-      error: errorMessage,
-      message: error.message,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+
+    const diagnosis = applyPlan(diagnosisRaw, plan);
+    const industry = classifyIndustryFromUrl(mobileUrl);
+
+    return res.json({
+      success: true,
+      meta: {
+        fetchedAt: new Date().toISOString(),
+        plan,
+        debug
+      },
+      industry,
+      place: diagnosis.placeData,
+      scores: diagnosis.scores,
+      recommend: {
+        totalScore: diagnosis.totalScore,
+        totalGrade: diagnosis.totalGrade,
+        improvements: diagnosis.improvements,
+        recommendedKeywords: diagnosis.recommendedKeywords,
+        competitors: diagnosis.competitors
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ 분석 오류:', error);
+    return res.status(500).json({
+      error: '진단 중 오류가 발생했습니다.',
+      message: error?.message || String(error)
     });
   }
 });
 
-// 유료 진단 API (경쟁사 분석 포함)
+// 무료 진단 API (레거시 유지)
+app.post('/api/diagnose/free', async (req: Request, res: Response) => {
+  try {
+    let { placeUrl } = req.body;
+
+    if (!placeUrl) return res.status(400).json({ error: '플레이스 URL을 입력해주세요' });
+    if (!isValidPlaceUrl(placeUrl)) {
+      return res.status(400).json({
+        error: '올바른 네이버 플레이스 URL을 입력해주세요',
+        message: '예시: https://map.naver.com/p/entry/place/1234567890'
+      });
+    }
+
+    placeUrl = convertToMobileUrl(placeUrl);
+    console.log('🔍 플레이스 정보 수집 시작(무료)...', placeUrl);
+
+    const { place: placeData } = await crawler.enrichPlace(placeUrl);
+    const diagnosis = applyPlan(diagnosisService.generateDiagnosis(placeData, false), 'free');
+
+    return res.json({ success: true, data: diagnosis });
+  } catch (error: any) {
+    console.error('❌ 진단 오류:', error);
+    return res.status(500).json({ error: '진단 중 오류가 발생했습니다', message: error?.message || String(error) });
+  }
+});
+
+// 유료 진단 API (레거시 유지)
 app.post('/api/diagnose/paid', async (req: Request, res: Response) => {
   try {
     let { placeUrl, searchQuery } = req.body;
 
-    if (!placeUrl) {
-      return res.status(400).json({ error: '플레이스 URL을 입력해주세요' });
-    }
-
-    // URL 검증
+    if (!placeUrl) return res.status(400).json({ error: '플레이스 URL을 입력해주세요' });
     if (!isValidPlaceUrl(placeUrl)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: '올바른 네이버 플레이스 URL을 입력해주세요',
-        message: '예시: https://m.place.naver.com/restaurant/1234567890'
+        message: '예시: https://map.naver.com/p/entry/place/1234567890'
       });
     }
 
-    // 모바일 URL로 변환
     placeUrl = convertToMobileUrl(placeUrl);
-    console.log('변환된 URL:', placeUrl);
+    console.log('🔍 플레이스 정보 수집 시작(유료)...', placeUrl);
 
-    // 플레이스 정보 크롤링
-    console.log('🔍 플레이스 정보 수집 중:', placeUrl);
-    const placeData = await crawler.enrichPlace(placeUrl);
-
-    // 진단 실행 (유료)
-    console.log('📊 진단 중...');
+    const { place: placeData } = await crawler.enrichPlace(placeUrl);
     const diagnosis = diagnosisService.generateDiagnosis(placeData, true);
 
-    // 경쟁사 분석
     if (searchQuery) {
-      console.log('🔎 경쟁사 분석 중:', searchQuery);
       try {
         const competitors = await crawler.searchCompetitors(searchQuery, 5);
-        diagnosis.competitors = competitors.map(c => ({
-          name: c.name,
-          address: c.address,
-          keywords: c.keywords,
-          reviewCount: c.reviewCount,
-          photoCount: c.photoCount
-        }));
-      } catch (error) {
-        console.error('경쟁사 분석 오류:', error);
-        // 경쟁사 분석 실패해도 기본 진단은 반환
+        diagnosis.competitors = competitors;
+      } catch (e) {
+        console.error('경쟁사 분석 오류:', e);
       }
     }
 
-    res.json({
-      success: true,
-      data: diagnosis
-    });
-
+    return res.json({ success: true, data: diagnosis });
   } catch (error: any) {
-    console.error('진단 오류:', error);
-    res.status(500).json({ 
-      error: '진단 중 오류가 발생했습니다',
-      message: error.message 
-    });
+    console.error('❌ 진단 오류:', error);
+    return res.status(500).json({ error: '진단 중 오류가 발생했습니다', message: error?.message || String(error) });
   }
 });
 
-// 404 handler
+// 404
 app.use((req: Request, res: Response) => {
   res.status(404).json({ error: 'Not found' });
 });
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
-  console.log('SIGTERM 신호 수신, 서버 종료 중...');
+  console.log('SIGTERM 수신, 종료 중...');
   await crawler.close();
   process.exit(0);
 });
-
 process.on('SIGINT', async () => {
-  console.log('SIGINT 신호 수신, 서버 종료 중...');
+  console.log('SIGINT 수신, 종료 중...');
   await crawler.close();
   process.exit(0);
 });
