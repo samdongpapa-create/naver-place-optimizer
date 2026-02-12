@@ -26,9 +26,17 @@ export class NaverPlaceCrawler {
   }
 
   async enrichPlace(placeUrl: string): Promise<PlaceData> {
-    if (!this.browser) await this.initialize();
+    if (!this.browser) {
+      await this.initialize();
+    }
 
-    const page = await this.browser.newPage();
+    // ✅ 여기서 browser를 고정해서 TS null 에러 방지
+    const browser = this.browser;
+    if (!browser) {
+      throw new Error('브라우저 초기화 실패');
+    }
+
+    const page = await browser.newPage();
 
     try {
       console.log('페이지 로딩 중...');
@@ -72,9 +80,7 @@ export class NaverPlaceCrawler {
       const reviewMatch =
         html.match(/"reviewCount"\s*:\s*(\d+)/) ||
         html.match(/방문자리뷰\s*([0-9,]+)/);
-      if (reviewMatch?.[1]) {
-        reviewCount = this.parseNumber(reviewMatch[1]);
-      }
+      if (reviewMatch?.[1]) reviewCount = this.parseNumber(reviewMatch[1]);
 
       // -------------------------
       // 사진 수
@@ -83,9 +89,7 @@ export class NaverPlaceCrawler {
       const photoMatch =
         html.match(/"photoCount"\s*:\s*(\d+)/) ||
         html.match(/사진\s*([0-9,]+)/);
-      if (photoMatch?.[1]) {
-        photoCount = this.parseNumber(photoMatch[1]);
-      }
+      if (photoMatch?.[1]) photoCount = this.parseNumber(photoMatch[1]);
 
       // -------------------------
       // 상세설명
@@ -94,9 +98,7 @@ export class NaverPlaceCrawler {
       const descMatch =
         html.match(/"introduction"\s*:\s*"([^"]+)"/) ||
         html.match(/"description"\s*:\s*"([^"]+)"/);
-      if (descMatch?.[1]) {
-        description = descMatch[1];
-      }
+      if (descMatch?.[1]) description = descMatch[1];
 
       // -------------------------
       // 오시는길
@@ -105,9 +107,7 @@ export class NaverPlaceCrawler {
       const dirMatch =
         html.match(/"directions"\s*:\s*"([^"]+)"/) ||
         html.match(/"way"\s*:\s*"([^"]+)"/);
-      if (dirMatch?.[1]) {
-        directions = dirMatch[1];
-      }
+      if (dirMatch?.[1]) directions = dirMatch[1];
 
       // -------------------------
       // 대표키워드
@@ -140,13 +140,14 @@ export class NaverPlaceCrawler {
       return result;
 
     } catch (error: any) {
-      await page.close();
+      try { await page.close(); } catch {}
       console.error('❌ 크롤링 오류:', error);
       throw new Error(`플레이스 정보 추출 실패: ${error.message}`);
     }
   }
 
-  async searchCompetitors(query: string, count: number = 5): Promise<PlaceData[]> {
+  // 일단 MVP에서는 비워둬도 됨 (server.ts에서 사용하면 추후 구현)
+  async searchCompetitors(_query: string, _count: number = 5): Promise<PlaceData[]> {
     return [];
   }
 }
