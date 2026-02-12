@@ -1,11 +1,15 @@
 // API Base URL
 const API_BASE = window.location.origin;
 
+// 현재 플레이스 URL 저장
+let currentPlaceUrl = '';
+
 // 섹션 표시 함수
 function showSection(sectionId) {
     const sections = ['inputSection', 'loadingSection', 'reportSection', 'errorSection'];
     sections.forEach(id => {
-        document.getElementById(id).style.display = id === sectionId ? 'block' : 'none';
+        const el = document.getElementById(id);
+        if (el) el.style.display = id === sectionId ? 'block' : 'none';
     });
 }
 
@@ -18,7 +22,7 @@ function showError(message) {
 // 진단 초기화
 function resetDiagnosis() {
     document.getElementById('placeUrl').value = '';
-    document.getElementById('searchQuery').value = '';
+    currentPlaceUrl = '';
     showSection('inputSection');
 }
 
@@ -31,6 +35,7 @@ async function diagnoseFree() {
         return;
     }
 
+    currentPlaceUrl = placeUrl;
     showSection('loadingSection');
 
     try {
@@ -44,7 +49,7 @@ async function diagnoseFree() {
 
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.message || '진단 중 오류가 발생했습니다');
+            throw new Error(error.message || error.error || '진단 중 오류가 발생했습니다');
         }
 
         const result = await response.json();
@@ -56,20 +61,33 @@ async function diagnoseFree() {
     }
 }
 
+// 유료 진단 모달 표시
+function showPaidModal() {
+    document.getElementById('paidModal').style.display = 'flex';
+}
+
+// 유료 진단 모달 닫기
+function closePaidModal() {
+    document.getElementById('paidModal').style.display = 'none';
+}
+
 // 유료 진단
 async function diagnosePaid() {
-    const placeUrl = document.getElementById('placeUrl').value.trim();
     const searchQuery = document.getElementById('searchQuery').value.trim();
     
-    if (!placeUrl) {
-        alert('플레이스 URL을 입력해주세요');
+    if (!searchQuery) {
+        alert('경쟁사 분석을 위한 검색어를 입력해주세요\n(예: 강남 카페, 이태원 맛집)');
         return;
     }
 
-    if (!confirm('유료 진단 (₩9,900)을 진행하시겠습니까?')) {
+    if (!currentPlaceUrl) {
+        alert('플레이스 URL이 없습니다. 다시 시도해주세요.');
+        closePaidModal();
+        resetDiagnosis();
         return;
     }
 
+    closePaidModal();
     showSection('loadingSection');
 
     try {
@@ -78,12 +96,15 @@ async function diagnosePaid() {
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ placeUrl, searchQuery })
+            body: JSON.stringify({ 
+                placeUrl: currentPlaceUrl, 
+                searchQuery 
+            })
         });
 
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.message || '진단 중 오류가 발생했습니다');
+            throw new Error(error.message || error.error || '진단 중 오류가 발생했습니다');
         }
 
         const result = await response.json();
@@ -104,30 +125,40 @@ function displayReport(data, isPaid) {
     // 총점
     document.getElementById('totalScore').textContent = data.totalScore;
     document.getElementById('totalGrade').textContent = data.totalGrade;
+    
+    // 총점 배지 색상
+    const gradeBadge = document.getElementById('totalGradeBadge');
+    gradeBadge.className = `grade-badge grade-${data.totalGrade}`;
 
     // 카테고리별 점수
-    displayCategoryScores(data.scores, isPaid);
+    displayCategoryScores(data.scores);
 
-    // 유료 버전 - 개선안 표시
-    if (isPaid && data.improvements) {
-        displayImprovements(data.improvements);
-        document.getElementById('improvementsSection').style.display = 'block';
+    // 무료 버전 - 업그레이드 섹션 표시
+    if (!isPaid) {
+        document.getElementById('upgradeSection').style.display = 'block';
+        document.getElementById('improvementsSection').style.display = 'none';
+        document.getElementById('competitorsSection').style.display = 'none';
     } else {
-        // 무료 버전 - 블러 처리된 미리보기
-        displayBlurredPreview();
-    }
-
-    // 유료 버전 - 경쟁사 분석 표시
-    if (isPaid && data.competitors) {
-        displayCompetitors(data.competitors, data.recommendedKeywords);
-        document.getElementById('competitorsSection').style.display = 'block';
+        // 유료 버전 - 개선안 및 경쟁사 분석 표시
+        document.getElementById('upgradeSection').style.display = 'none';
+        
+        if (data.improvements) {
+            displayImprovements(data.improvements);
+            document.getElementById('improvementsSection').style.display = 'block';
+        }
+        
+        if (data.competitors) {
+            displayCompetitors(data.competitors, data.recommendedKeywords);
+            document.getElementById('competitorsSection').style.display = 'block';
+        }
     }
 
     showSection('reportSection');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // 카테고리별 점수 표시
-function displayCategoryScores(scores, isPaid) {
+function displayCategoryScores(scores) {
     const categoryScoresDiv = document.getElementById('categoryScores');
     categoryScoresDiv.innerHTML = '';
 
@@ -144,18 +175,20 @@ function displayCategoryScores(scores, isPaid) {
         const card = document.createElement('div');
         card.className = 'category-card';
         
-        const issuesList = score.issues.map(issue => `<li>${issue}</li>`).join('');
+        const issuesList = score.issues.length > 0 
+            ? score.issues.map(issue => `<li>${issue}</li>`).join('')
+            : '<li>문제가 발견되지 않았습니다 ✓</li>';
         
         card.innerHTML = `
             <div class="category-header">
                 <div class="category-title">${cat.icon} ${cat.title}</div>
-                <div class="category-score-badge">
-                    <span class="score-number">${score.score}</span>
-                    <span class="grade-badge grade-${score.grade}">${score.grade}</span>
+                <div class="category-score">
+                    <span class="category-score-number">${score.score}</span>
+                    <span class="category-grade grade-${score.grade}">${score.grade}</span>
                 </div>
             </div>
             <ul class="category-issues">
-                ${issuesList || '<li>문제 없음</li>'}
+                ${issuesList}
             </ul>
         `;
         
@@ -166,7 +199,7 @@ function displayCategoryScores(scores, isPaid) {
 // 개선안 표시 (유료)
 function displayImprovements(improvements) {
     const improvementsSection = document.getElementById('improvementsSection');
-    improvementsSection.innerHTML = '<h3>📋 개선안</h3>';
+    improvementsSection.innerHTML = '<h3 class="section-title">💡 맞춤 개선안</h3>';
 
     const improvementTypes = [
         { key: 'description', icon: '📝', title: '상세설명 개선안' },
@@ -194,7 +227,7 @@ function displayImprovements(improvements) {
         }
     });
 
-    // 추천 키워드 (배열인 경우)
+    // 추천 키워드
     if (improvements.keywords && Array.isArray(improvements.keywords)) {
         const card = document.createElement('div');
         card.className = 'improvement-card';
@@ -212,61 +245,30 @@ function displayImprovements(improvements) {
     }
 }
 
-// 블러 처리된 미리보기 (무료)
-function displayBlurredPreview() {
-    const improvementsSection = document.getElementById('improvementsSection');
-    improvementsSection.innerHTML = `
-        <h3>📋 개선안</h3>
-        <div class="blurred">
-            <div class="improvement-card">
-                <h3>📝 상세설명 개선안</h3>
-                <div class="improvement-content">
-                    Lorem ipsum dolor sit amet, consectetur adipiscing elit...
-                    Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
-                    Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris...
-                </div>
-            </div>
-            <div class="improvement-card">
-                <h3>🗺️ 오시는길 개선안</h3>
-                <div class="improvement-content">
-                    Lorem ipsum dolor sit amet, consectetur adipiscing elit...
-                    Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
-                </div>
-            </div>
-        </div>
-        <div class="upgrade-overlay">
-            <h4>🎯 전체 개선안을 확인하세요!</h4>
-            <p>유료 진단에서 모든 항목의 상세한 개선안과 경쟁사 분석을 제공합니다</p>
-            <button class="btn btn-primary" onclick="scrollToTop()">
-                유료 진단 시작하기
-            </button>
-        </div>
-    `;
-    improvementsSection.style.display = 'block';
-}
-
 // 경쟁사 분석 표시 (유료)
 function displayCompetitors(competitors, recommendedKeywords) {
     const competitorsSection = document.getElementById('competitorsSection');
-    competitorsSection.innerHTML = '<h3>🏆 경쟁사 Top 5 분석</h3>';
+    competitorsSection.innerHTML = '<h3 class="section-title">🏆 경쟁사 Top 5 분석</h3>';
 
-    competitors.forEach((comp, index) => {
-        const card = document.createElement('div');
-        card.className = 'competitor-card';
-        
-        const keywordTags = comp.keywords
-            .map(kw => `<span class="keyword-tag">${kw}</span>`)
-            .join('');
-        
-        card.innerHTML = `
-            <h4>${index + 1}. ${comp.name}</h4>
-            <p>${comp.address}</p>
-            <p>리뷰: ${comp.reviewCount}개 | 사진: ${comp.photoCount}개</p>
-            <div class="competitor-keywords">${keywordTags}</div>
-        `;
-        
-        competitorsSection.appendChild(card);
-    });
+    if (competitors && competitors.length > 0) {
+        competitors.forEach((comp, index) => {
+            const card = document.createElement('div');
+            card.className = 'competitor-card';
+            
+            const keywordTags = comp.keywords && comp.keywords.length > 0
+                ? comp.keywords.map(kw => `<span class="keyword-tag">${kw}</span>`).join('')
+                : '<span style="color: #999;">키워드 없음</span>';
+            
+            card.innerHTML = `
+                <h4>${index + 1}. ${comp.name}</h4>
+                <p>${comp.address || '주소 정보 없음'}</p>
+                <p style="font-size: 0.85rem; color: #999;">리뷰: ${comp.reviewCount}개 | 사진: ${comp.photoCount}개</p>
+                <div class="competitor-keywords">${keywordTags}</div>
+            `;
+            
+            competitorsSection.appendChild(card);
+        });
+    }
 
     // 추천 키워드
     if (recommendedKeywords && recommendedKeywords.length > 0) {
@@ -294,19 +296,48 @@ function copyToClipboard(elementId) {
     const text = element.textContent;
     
     navigator.clipboard.writeText(text).then(() => {
-        alert('복사되었습니다! 네이버 플레이스에 붙여넣기 하세요.');
+        alert('✅ 복사되었습니다!\n네이버 플레이스에 붙여넣기 하세요.');
     }).catch(err => {
         console.error('복사 실패:', err);
-        alert('복사에 실패했습니다. 다시 시도해주세요.');
+        
+        // Fallback: 텍스트 선택
+        const range = document.createRange();
+        range.selectNode(element);
+        window.getSelection().removeAllRanges();
+        window.getSelection().addRange(range);
+        
+        try {
+            document.execCommand('copy');
+            alert('✅ 복사되었습니다!');
+        } catch (e) {
+            alert('❌ 복사에 실패했습니다. 수동으로 복사해주세요.');
+        }
+        
+        window.getSelection().removeAllRanges();
     });
-}
-
-// 맨 위로 스크롤
-function scrollToTop() {
-    window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // 초기화
 document.addEventListener('DOMContentLoaded', () => {
     showSection('inputSection');
+    
+    // Enter 키 이벤트
+    document.getElementById('placeUrl').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            diagnoseFree();
+        }
+    });
+    
+    document.getElementById('searchQuery').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            diagnosePaid();
+        }
+    });
+    
+    // 모달 외부 클릭 시 닫기
+    document.getElementById('paidModal').addEventListener('click', (e) => {
+        if (e.target.id === 'paidModal') {
+            closePaidModal();
+        }
+    });
 });
