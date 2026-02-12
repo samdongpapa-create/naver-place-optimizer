@@ -25,12 +25,43 @@ export class NaverPlaceCrawler {
     return cleaned ? Number(cleaned) : 0;
   }
 
+  private async safeText(frame: FrameLike, selector: string): Promise<string> {
+    try {
+      const el = await frame.$(selector);
+      if (!el) return '';
+      const t = await el.textContent();
+      return (t || '').trim();
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * iframe 내부에서 "실제 플레이스 데이터가 들어온 상태"가 될 때까지 기다림
+   * (wrapper HTML/네이버페이 문구를 긁는 문제 해결)
+   */
+  private async waitUntilPlaceDataReady(frame: Frame): Promise<void> {
+    // keywordList가 없는 업종도 있으니, 주소/리뷰카운트도 조건에 포함
+    await frame
+      .waitForFunction(
+        () => {
+          const html = (window as any)?.document?.body?.innerHTML || '';
+          return (
+            html.includes('"keywordList"') ||
+            html.includes('"roadAddress"') ||
+            html.includes('"reviewCount"')
+          );
+        },
+        { timeout: 15000 }
+      )
+      .catch(() => {});
+  }
+
   async enrichPlace(placeUrl: string): Promise<PlaceData> {
     if (!this.browser) {
       await this.initialize();
     }
 
-    // ✅ 여기서 browser를 고정해서 TS null 에러 방지
     const browser = this.browser;
     if (!browser) {
       throw new Error('브라우저 초기화 실패');
@@ -41,7 +72,7 @@ export class NaverPlaceCrawler {
     try {
       console.log('페이지 로딩 중...');
       await page.goto(placeUrl, { waitUntil: 'load', timeout: 60000 });
-      await page.waitForTimeout(4000);
+      await page.waitForTimeout(2000);
 
       console.log('iframe 대기 중...');
       await page.waitForSelector('iframe#entryIframe', { timeout: 30000 });
@@ -49,33 +80,42 @@ export class NaverPlaceCrawler {
       const frameEl = await page.$('iframe#entryIframe');
       const frame = frameEl ? await frameEl.contentFrame() : null;
 
-      if (!frame) throw new Error('iframe 로드 실패');
+      if (!frame) throw new Error('entryIframe 로드 실패');
 
-      await page.waitForTimeout(2000);
+      // ✅ 핵심: 실제 데이터가 들어올 때까지 대기
+      await this.waitUntilPlaceDataReady(frame);
 
-      // 🔥 실제 플레이스 데이터 로딩될 때까지 대기
-await frame.waitForFunction(() => {
-  return document.body.innerHTML.includes('"keywordList"');
-}, { timeout: 15000 }).catch(() => {});
-
-const html = await frame.content();
-
+      // iframe HTML
+      const html = await frame.content();
 
       // -------------------------
-      // 이름
+      // 이름 (DOM 우선 → regex 보조)
       // -------------------------
       let name = '';
-      const nameMatch = html.match(/<title>(.*?)<\/title>/);
-      if (nameMatch?.[1]) {
-        name = nameMatch[1].replace(' : 네이버', '').trim();
+      const nameSelectors = ['.Fc1rA', '.GHAhO', 'span.Fc1rA', 'div.Fc1rA', 'h1'];
+      for (const sel of nameSelectors) {
+        const t = await this.safeText(frame, sel);
+        if (t) {
+          name = t;
+          break;
+        }
+      }
+      if (!name) {
+        // JSON 안에 name이 여러개 있을 수 있으니 placeName/bizName도 같이 시도
+        const m =
+          html.match(/"placeName"\s*:\s*"([^"]+)"/) ||
+          html.match(/"bizName"\s*:\s*"([^"]+)"/) ||
+          html.match(/"name"\s*:\s*"([^"]+)"/);
+        if (m?.[1]) name = m[1].trim();
       }
 
       // -------------------------
-      // 주소
+      // 주소 (JSON 우선)
       // -------------------------
       let address = '';
       const addrMatch =
         html.match(/"roadAddress"\s*:\s*"([^"]+)"/) ||
+        html.match(/"jibunAddress"\s*:\s*"([^"]+)"/) ||
         html.match(/"address"\s*:\s*"([^"]+)"/);
       if (addrMatch?.[1]) address = addrMatch[1];
 
@@ -85,7 +125,8 @@ const html = await frame.content();
       let reviewCount = 0;
       const reviewMatch =
         html.match(/"reviewCount"\s*:\s*(\d+)/) ||
-        html.match(/방문자리뷰\s*([0-9,]+)/);
+        html.match(/방문자리뷰\s*([0-9,]+)/) ||
+        html.match(/리뷰\s*([0-9,]+)/);
       if (reviewMatch?.[1]) reviewCount = this.parseNumber(reviewMatch[1]);
 
       // -------------------------
@@ -103,7 +144,8 @@ const html = await frame.content();
       let description = '';
       const descMatch =
         html.match(/"introduction"\s*:\s*"([^"]+)"/) ||
-        html.match(/"description"\s*:\s*"([^"]+)"/);
+        html.match(/"description"\s*:\s*"([^"]+)"/) ||
+        html.match(/"summary"\s*:\s*"([^"]+)"/);
       if (descMatch?.[1]) description = descMatch[1];
 
       // -------------------------
@@ -112,7 +154,8 @@ const html = await frame.content();
       let directions = '';
       const dirMatch =
         html.match(/"directions"\s*:\s*"([^"]+)"/) ||
-        html.match(/"way"\s*:\s*"([^"]+)"/);
+        html.match(/"way"\s*:\s*"([^"]+)"/) ||
+        html.match(/"wayDescription"\s*:\s*"([^"]+)"/);
       if (dirMatch?.[1]) directions = dirMatch[1];
 
       // -------------------------
@@ -122,9 +165,10 @@ const html = await frame.content();
       const keywordMatch = html.match(/"keywordList"\s*:\s*\[(.*?)\]/s);
       if (keywordMatch?.[1]) {
         const items = keywordMatch[1].match(/"text"\s*:\s*"([^"]+)"/g);
-        if (items) {
+        if (items?.length) {
           keywords = items
             .map(x => x.match(/"text"\s*:\s*"([^"]+)"/)?.[1] || '')
+            .map(s => s.trim())
             .filter(Boolean)
             .slice(0, 5);
         }
@@ -133,26 +177,27 @@ const html = await frame.content();
       await page.close();
 
       const result: PlaceData = {
-        name: name || '',
-        address: address || '',
+        name: (name || '').trim(),
+        address: (address || '').trim(),
         reviewCount: reviewCount || 0,
         photoCount: photoCount || 0,
-        description: description || '',
-        directions: directions || '',
+        description: (description || '').trim(),
+        directions: (directions || '').trim(),
         keywords: keywords || []
       };
 
       console.log('✅ 최종 결과:', result);
       return result;
-
     } catch (error: any) {
-      try { await page.close(); } catch {}
+      try {
+        await page.close();
+      } catch {}
       console.error('❌ 크롤링 오류:', error);
-      throw new Error(`플레이스 정보 추출 실패: ${error.message}`);
+      throw new Error(`플레이스 정보 추출 실패: ${error?.message || error}`);
     }
   }
 
-  // 일단 MVP에서는 비워둬도 됨 (server.ts에서 사용하면 추후 구현)
+  // MVP 단계에서는 빈 배열로 두고, 필요하면 다음 단계에서 구현
   async searchCompetitors(_query: string, _count: number = 5): Promise<PlaceData[]> {
     return [];
   }
