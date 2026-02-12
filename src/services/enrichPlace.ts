@@ -171,7 +171,7 @@ export class NaverPlaceCrawler {
       // __NEXT_DATA__가 있으면 그걸 1순위로 파싱
       const nextDataText = await frame.$eval(
         'script#__NEXT_DATA__',
-        (el) => (el as HTMLScriptElement).textContent || ''
+        (el) => (el as any).textContent || ''
       ).catch(() => '');
 
       if (nextDataText) {
