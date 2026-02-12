@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import dotenv from 'dotenv';
 import { NaverPlaceCrawler } from './services/enrichPlace';
-import { DiagnosisService } from './services/diagnosis';
+import { PlaceDiagnosisService } from './services/diagnosis';
 import { convertToMobileUrl, isValidPlaceUrl } from './utils/urlHelper';
 
 dotenv.config();
@@ -18,7 +18,7 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 // Services
 const crawler = new NaverPlaceCrawler();
-const diagnosisService = new DiagnosisService();
+const diagnosisService = new PlaceDiagnosisService();
 
 // 서버 시작 시 브라우저 초기화
 (async () => {
