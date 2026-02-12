@@ -26,26 +26,86 @@ export class NaverPlaceCrawler {
     const page = await this.browser!.newPage();
     
     try {
-      // 네이버 플레이스 페이지 로드
+      // 네이버 플레이스 페이지 로드 (타임아웃 증가)
       await page.goto(placeUrl, { 
-        waitUntil: 'networkidle',
-        timeout: 30000 
+        waitUntil: 'domcontentloaded',
+        timeout: 60000 
       });
 
-      // iframe으로 전환 (네이버 플레이스는 iframe 구조)
-      const frame = page.frameLocator('iframe#entryIframe');
+      // 페이지 로딩 대기
+      await page.waitForTimeout(3000);
 
-      // 플레이스명 추출
-      const name = await frame.locator('.GHAhO').first().textContent() || '';
+      // iframe 대기 및 접근
+      await page.waitForSelector('iframe#entryIframe', { timeout: 10000 });
+      const frameElement = await page.$('iframe#entryIframe');
+      
+      if (!frameElement) {
+        throw new Error('iframe을 찾을 수 없습니다');
+      }
 
-      // 주소 추출
-      const address = await frame.locator('.LDgIH').first().textContent() || '';
+      const frame = await frameElement.contentFrame();
+      
+      if (!frame) {
+        throw new Error('iframe 콘텐츠에 접근할 수 없습니다');
+      }
+
+      // 추가 로딩 대기
+      await frame.waitForLoadState('domcontentloaded');
+      await page.waitForTimeout(2000);
+
+      // 플레이스명 추출 (여러 셀렉터 시도)
+      let name = '';
+      const nameSelectors = ['.GHAhO', '.Fc1rA', 'span.Fc1rA', 'div.Fc1rA'];
+      for (const selector of nameSelectors) {
+        try {
+          const element = await frame.$(selector);
+          if (element) {
+            name = (await element.textContent()) || '';
+            if (name) break;
+          }
+        } catch (e) {
+          continue;
+        }
+      }
+
+      // 주소 추출 (여러 셀렉터 시도)
+      let address = '';
+      const addressSelectors = ['.LDgIH', '.IH3UA', 'span.LDgIH'];
+      for (const selector of addressSelectors) {
+        try {
+          const element = await frame.$(selector);
+          if (element) {
+            address = (await element.textContent()) || '';
+            if (address) break;
+          }
+        } catch (e) {
+          continue;
+        }
+      }
 
       // 리뷰 수 추출
       let reviewCount = 0;
       try {
-        const reviewText = await frame.locator('.place_section_content .PXMot.LXIwF em').first().textContent();
-        reviewCount = parseInt(reviewText?.replace(/,/g, '') || '0');
+        const reviewSelectors = [
+          '.place_section_content .PXMot.LXIwF em',
+          'em.PXMot',
+          '.veBoZ em'
+        ];
+        
+        for (const selector of reviewSelectors) {
+          try {
+            const element = await frame.$(selector);
+            if (element) {
+              const reviewText = await element.textContent();
+              if (reviewText) {
+                reviewCount = parseInt(reviewText.replace(/,/g, '').replace(/[^0-9]/g, '')) || 0;
+                if (reviewCount > 0) break;
+              }
+            }
+          } catch (e) {
+            continue;
+          }
+        }
       } catch (e) {
         console.log('리뷰 수 추출 실패:', e);
       }
@@ -53,8 +113,26 @@ export class NaverPlaceCrawler {
       // 사진 수 추출
       let photoCount = 0;
       try {
-        const photoText = await frame.locator('.place_section_content .PXMot.YPrKL em').first().textContent();
-        photoCount = parseInt(photoText?.replace(/,/g, '') || '0');
+        const photoSelectors = [
+          '.place_section_content .PXMot.YPrKL em',
+          'a[href*="photo"] em',
+          '.K0PDV em'
+        ];
+        
+        for (const selector of photoSelectors) {
+          try {
+            const element = await frame.$(selector);
+            if (element) {
+              const photoText = await element.textContent();
+              if (photoText) {
+                photoCount = parseInt(photoText.replace(/,/g, '').replace(/[^0-9]/g, '')) || 0;
+                if (photoCount > 0) break;
+              }
+            }
+          } catch (e) {
+            continue;
+          }
+        }
       } catch (e) {
         console.log('사진 수 추출 실패:', e);
       }
@@ -62,7 +140,19 @@ export class NaverPlaceCrawler {
       // 상세설명 추출
       let description = '';
       try {
-        description = await frame.locator('.zPfVt').first().textContent() || '';
+        const descSelectors = ['.zPfVt', '.vV_z_', '.contact'];
+        
+        for (const selector of descSelectors) {
+          try {
+            const element = await frame.$(selector);
+            if (element) {
+              description = (await element.textContent()) || '';
+              if (description) break;
+            }
+          } catch (e) {
+            continue;
+          }
+        }
       } catch (e) {
         console.log('상세설명 추출 실패:', e);
       }
@@ -70,11 +160,41 @@ export class NaverPlaceCrawler {
       // 오시는길 추출
       let directions = '';
       try {
-        const directionsBtn = frame.locator('a:has-text("오시는길")').first();
-        if (await directionsBtn.count() > 0) {
-          await directionsBtn.click();
-          await page.waitForTimeout(1000);
-          directions = await frame.locator('.vV_z_').first().textContent() || '';
+        // 오시는길 탭 클릭 시도
+        const directionsBtnSelectors = [
+          'a:has-text("오시는길")',
+          'button:has-text("오시는길")',
+          '[data-nclicks*="way"]'
+        ];
+        
+        for (const selector of directionsBtnSelectors) {
+          try {
+            const btn = await frame.$(selector);
+            if (btn) {
+              await btn.click();
+              await page.waitForTimeout(2000);
+              break;
+            }
+          } catch (e) {
+            continue;
+          }
+        }
+        
+        // 오시는길 텍스트 추출
+        const directionsSelectors = ['.vV_z_', '.way_description', 'p'];
+        for (const selector of directionsSelectors) {
+          try {
+            const element = await frame.$(selector);
+            if (element) {
+              const text = await element.textContent();
+              if (text && text.length > 10) {
+                directions = text;
+                break;
+              }
+            }
+          } catch (e) {
+            continue;
+          }
         }
       } catch (e) {
         console.log('오시는길 추출 실패:', e);
@@ -140,18 +260,30 @@ export class NaverPlaceCrawler {
     try {
       // 네이버 플레이스 검색
       const searchUrl = `https://m.place.naver.com/search?query=${encodeURIComponent(query)}`;
-      await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.goto(searchUrl, { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 60000 
+      });
+
+      // 페이지 로딩 대기
+      await page.waitForTimeout(3000);
 
       // 검색 결과에서 상위 업체 추출
-      const placeLinks = await page.locator('a[href*="/place/"]').all();
+      const placeLinks = await page.$$('a[href*="/place/"]');
+      
+      console.log(`검색 결과: ${placeLinks.length}개 발견`);
       
       for (let i = 0; i < Math.min(count, placeLinks.length); i++) {
         try {
           const href = await placeLinks[i].getAttribute('href');
           if (href) {
-            const fullUrl = `https://m.place.naver.com${href}`;
+            const fullUrl = href.startsWith('http') ? href : `https://m.place.naver.com${href}`;
+            console.log(`경쟁사 ${i + 1} 크롤링 중: ${fullUrl}`);
             const placeData = await this.enrichPlace(fullUrl);
             competitors.push(placeData);
+            
+            // 과도한 요청 방지
+            await page.waitForTimeout(1000);
           }
         } catch (e) {
           console.log(`경쟁사 ${i + 1} 추출 실패:`, e);

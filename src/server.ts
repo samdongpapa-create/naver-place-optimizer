@@ -4,6 +4,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { NaverPlaceCrawler } from './services/enrichPlace';
 import { DiagnosisService } from './services/diagnosis';
+import { convertToMobileUrl, isValidPlaceUrl } from './utils/urlHelper';
 
 dotenv.config();
 
@@ -37,11 +38,23 @@ app.get('/api/health', (req: Request, res: Response) => {
 // 무료 진단 API
 app.post('/api/diagnose/free', async (req: Request, res: Response) => {
   try {
-    const { placeUrl } = req.body;
+    let { placeUrl } = req.body;
 
     if (!placeUrl) {
       return res.status(400).json({ error: '플레이스 URL을 입력해주세요' });
     }
+
+    // URL 검증
+    if (!isValidPlaceUrl(placeUrl)) {
+      return res.status(400).json({ 
+        error: '올바른 네이버 플레이스 URL을 입력해주세요',
+        message: '예시: https://m.place.naver.com/restaurant/1234567890'
+      });
+    }
+
+    // 모바일 URL로 변환
+    placeUrl = convertToMobileUrl(placeUrl);
+    console.log('변환된 URL:', placeUrl);
 
     // 플레이스 정보 크롤링
     console.log('🔍 플레이스 정보 수집 중:', placeUrl);
@@ -68,11 +81,23 @@ app.post('/api/diagnose/free', async (req: Request, res: Response) => {
 // 유료 진단 API (경쟁사 분석 포함)
 app.post('/api/diagnose/paid', async (req: Request, res: Response) => {
   try {
-    const { placeUrl, searchQuery } = req.body;
+    let { placeUrl, searchQuery } = req.body;
 
     if (!placeUrl) {
       return res.status(400).json({ error: '플레이스 URL을 입력해주세요' });
     }
+
+    // URL 검증
+    if (!isValidPlaceUrl(placeUrl)) {
+      return res.status(400).json({ 
+        error: '올바른 네이버 플레이스 URL을 입력해주세요',
+        message: '예시: https://m.place.naver.com/restaurant/1234567890'
+      });
+    }
+
+    // 모바일 URL로 변환
+    placeUrl = convertToMobileUrl(placeUrl);
+    console.log('변환된 URL:', placeUrl);
 
     // 플레이스 정보 크롤링
     console.log('🔍 플레이스 정보 수집 중:', placeUrl);
