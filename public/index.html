@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>네이버 플레이스 최적화 진단</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <h1>📊 네이버 플레이스</h1>
+                <p>최적화 진단 서비스</p>
+            </div>
+        </header>
+
+        <!-- Input Section -->
+        <section class="input-section" id="inputSection">
+            <div class="input-card">
+                <h2>플레이스 URL 입력</h2>
+                <p class="subtitle">네이버 플레이스 주소를 입력하면 최적화 진단을 시작합니다</p>
+                
+                <div class="input-group">
+                    <input 
+                        type="text" 
+                        id="placeUrl" 
+                        placeholder="https://m.place.naver.com/..."
+                        class="input-field"
+                    >
+                    <button onclick="diagnoseFree()" class="btn btn-primary">
+                        무료 진단 시작
+                    </button>
+                </div>
+
+                <div class="input-group" style="margin-top: 20px;">
+                    <input 
+                        type="text" 
+                        id="searchQuery" 
+                        placeholder="경쟁사 분석 검색어 (예: 강남 카페)"
+                        class="input-field"
+                    >
+                    <button onclick="diagnosePaid()" class="btn btn-secondary">
+                        유료 진단 (₩9,900)
+                    </button>
+                </div>
+
+                <div class="help-text">
+                    💡 Tip: 네이버 지도 또는 플레이스에서 해당 업체 URL을 복사하세요
+                </div>
+            </div>
+        </section>
+
+        <!-- Loading Section -->
+        <section class="loading-section" id="loadingSection" style="display: none;">
+            <div class="loader"></div>
+            <p class="loading-text">진단 중입니다...</p>
+            <p class="loading-subtext">플레이스 정보를 분석하고 있습니다</p>
+        </section>
+
+        <!-- Report Section -->
+        <section class="report-section" id="reportSection" style="display: none;">
+            <!-- Place Info -->
+            <div class="place-info-card">
+                <h2 id="placeName">-</h2>
+                <p id="placeAddress">-</p>
+            </div>
+
+            <!-- Total Score -->
+            <div class="total-score-card">
+                <div class="score-circle">
+                    <div class="score-value" id="totalScore">-</div>
+                    <div class="score-grade" id="totalGrade">-</div>
+                </div>
+                <h3>종합 점수</h3>
+            </div>
+
+            <!-- Category Scores -->
+            <div class="category-scores" id="categoryScores">
+                <!-- JavaScript로 동적 생성 -->
+            </div>
+
+            <!-- Improvements (Paid Only) -->
+            <div class="improvements-section" id="improvementsSection" style="display: none;">
+                <!-- JavaScript로 동적 생성 -->
+            </div>
+
+            <!-- Competitors (Paid Only) -->
+            <div class="competitors-section" id="competitorsSection" style="display: none;">
+                <!-- JavaScript로 동적 생성 -->
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="action-buttons">
+                <button onclick="resetDiagnosis()" class="btn btn-outline">
+                    새 진단 시작
+                </button>
+            </div>
+        </section>
+
+        <!-- Error Section -->
+        <section class="error-section" id="errorSection" style="display: none;">
+            <div class="error-card">
+                <h3>⚠️ 오류 발생</h3>
+                <p id="errorMessage">-</p>
+                <button onclick="resetDiagnosis()" class="btn btn-primary">
+                    다시 시도
+                </button>
+            </div>
+        </section>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
