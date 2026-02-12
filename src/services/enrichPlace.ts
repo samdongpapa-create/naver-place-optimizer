@@ -1,4 +1,4 @@
-import { chromium, Browser, Page } from 'playwright';
+import { chromium, Browser, Page, Frame } from 'playwright';
 import { PlaceData } from '../types';
 
 export class NaverPlaceCrawler {
@@ -24,53 +24,59 @@ export class NaverPlaceCrawler {
     }
 
     const page = await this.browser!.newPage();
-    
+
     try {
       console.log('페이지 로딩 중...');
-      await page.goto(placeUrl, { 
+      await page.goto(placeUrl, {
         waitUntil: 'load',
-        timeout: 60000 
+        timeout: 60000
       });
 
       // 충분한 로딩 대기
       await page.waitForTimeout(5000);
 
-      // iframe 대기 (타임아웃 증가)
+      // ✅ 안전장치: iframe 없으면 page로 fallback
       console.log('iframe 대기 중...');
+      let frame: Frame | Page | null = null;
+
       try {
-        await page.waitForSelector('iframe#entryIframe', { 
+        await page.waitForSelector('iframe#entryIframe', {
           timeout: 30000,
           state: 'attached'
         });
+
+        const frameElement = await page.$('iframe#entryIframe');
+        if (frameElement) {
+          const contentFrame = await frameElement.contentFrame();
+          if (contentFrame) {
+            frame = contentFrame;
+            console.log('entryIframe 로드 완료');
+          }
+        }
       } catch (e) {
-        console.error('iframe 찾기 실패');
-        throw new Error('네이버 플레이스 페이지를 찾을 수 없습니다. URL을 확인해주세요.');
+        // iframe이 없는 페이지 구조일 수 있음
+        console.warn('⚠️ entryIframe 대기 실패 → 메인 페이지에서 직접 추출로 fallback');
       }
 
-      const frameElement = await page.$('iframe#entryIframe');
-      if (!frameElement) {
-        throw new Error('iframe을 찾을 수 없습니다');
-      }
-
-      const frame = await frameElement.contentFrame();
+      // iframe을 못 잡았으면 메인 페이지로 진행
       if (!frame) {
-        throw new Error('iframe 콘텐츠에 접근할 수 없습니다');
+        frame = page;
       }
 
-      console.log('iframe 로드 완료, 데이터 추출 시작');
+      console.log('데이터 추출 시작');
       await page.waitForTimeout(3000);
 
       // 플레이스명 추출
       let name = '';
       const nameSelectors = [
         '.Fc1rA',
-        '.GHAhO', 
-        'span.Fc1rA', 
+        '.GHAhO',
+        'span.Fc1rA',
         'div.Fc1rA',
         'h1',
         '.place_detail_header h1'
       ];
-      
+
       for (const selector of nameSelectors) {
         try {
           const element = await frame.$(selector);
@@ -91,11 +97,11 @@ export class NaverPlaceCrawler {
       let address = '';
       const addressSelectors = [
         '.LDgIH',
-        '.IH3UA', 
+        '.IH3UA',
         'span.LDgIH',
         '.place_detail_address'
       ];
-      
+
       for (const selector of addressSelectors) {
         try {
           const element = await frame.$(selector);
@@ -119,19 +125,21 @@ export class NaverPlaceCrawler {
       try {
         // 페이지 소스에서 직접 추출 시도
         const pageContent = await frame.content();
-        
+
         // 리뷰 수 추출
-        const reviewMatches = pageContent.match(/방문자리뷰\s*(\d+)/i) || 
-                             pageContent.match(/리뷰\s*(\d+)/i) ||
-                             pageContent.match(/"reviewCount["\s:]+(\d+)/i);
+        const reviewMatches =
+          pageContent.match(/방문자리뷰\s*(\d+)/i) ||
+          pageContent.match(/리뷰\s*(\d+)/i) ||
+          pageContent.match(/"reviewCount["\s:]+(\d+)/i);
         if (reviewMatches && reviewMatches[1]) {
           reviewCount = parseInt(reviewMatches[1]);
           console.log('리뷰 수:', reviewCount);
         }
 
         // 사진 수 추출
-        const photoMatches = pageContent.match(/사진\s*(\d+)/i) ||
-                            pageContent.match(/"photoCount["\s:]+(\d+)/i);
+        const photoMatches =
+          pageContent.match(/사진\s*(\d+)/i) ||
+          pageContent.match(/"photoCount["\s:]+(\d+)/i);
         if (photoMatches && photoMatches[1]) {
           photoCount = parseInt(photoMatches[1]);
           console.log('사진 수:', photoCount);
@@ -143,16 +151,16 @@ export class NaverPlaceCrawler {
       // 상세정보 탭 클릭
       console.log('상세정보 탭 찾는 중...');
       let description = '';
-      
+
       try {
         // 홈/상세정보 탭 클릭 시도
         const homeTabs = [
           'a:has-text("홈")',
           'button:has-text("홈")',
           'a:has-text("상세정보")',
-          'span:has-text("홈")',
+          'span:has-text("홈")'
         ];
-        
+
         for (const tabSelector of homeTabs) {
           try {
             const tab = await frame.$(tabSelector);
@@ -198,7 +206,7 @@ export class NaverPlaceCrawler {
           '.place_detail_introduction',
           'div[class*="introduction"]'
         ];
-        
+
         for (const selector of descSelectors) {
           try {
             const element = await frame.$(selector);
@@ -221,15 +229,15 @@ export class NaverPlaceCrawler {
       // 오시는길 정보 추출
       console.log('오시는길 정보 찾는 중...');
       let directions = '';
-      
+
       try {
         // 오시는길 탭 클릭
         const wayTabs = [
           'a:has-text("오시는길")',
           'button:has-text("오시는길")',
-          'span:has-text("오시는길")',
+          'span:has-text("오시는길")'
         ];
-        
+
         for (const tabSelector of wayTabs) {
           try {
             const tab = await frame.$(tabSelector);
@@ -247,7 +255,7 @@ export class NaverPlaceCrawler {
         // 더보기 버튼 클릭
         const wayMoreButtons = [
           'a.zuyEj:has-text("더보기")',
-          'button:has-text("더보기")',
+          'button:has-text("더보기")'
         ];
 
         for (const btnSelector of wayMoreButtons) {
@@ -273,7 +281,7 @@ export class NaverPlaceCrawler {
           'div[class*="way"]',
           'div[class*="direction"]'
         ];
-        
+
         for (const selector of directionSelectors) {
           try {
             const element = await frame.$(selector);
@@ -312,7 +320,6 @@ export class NaverPlaceCrawler {
 
       console.log('최종 결과:', result);
       return result;
-
     } catch (error) {
       await page.close();
       console.error('크롤링 오류:', error);
@@ -324,19 +331,19 @@ export class NaverPlaceCrawler {
     try {
       // 페이지 소스에서 keywordList 찾기
       const content = await page.content();
-      
+
       // keywordList 패턴 찾기
       const keywordMatch = content.match(/"keywordList":\[(.*?)\]/);
-      
+
       if (keywordMatch && keywordMatch[1]) {
         // JSON 문자열에서 키워드 추출
         const keywordsJson = keywordMatch[1];
         const keywords = keywordsJson.match(/"text":"([^"]+)"/g);
-        
+
         if (keywords) {
           return keywords
-            .map(k => k.match(/"text":"([^"]+)"/)?.[1] || '')
-            .filter(k => k.length > 0)
+            .map((k) => k.match(/"text":"([^"]+)"/)?.[1] || '')
+            .filter((k) => k.length > 0)
             .slice(0, 5); // 상위 5개만
         }
       }
@@ -359,9 +366,9 @@ export class NaverPlaceCrawler {
     try {
       // 네이버 플레이스 검색
       const searchUrl = `https://m.place.naver.com/search?query=${encodeURIComponent(query)}`;
-      await page.goto(searchUrl, { 
-        waitUntil: 'domcontentloaded', 
-        timeout: 60000 
+      await page.goto(searchUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
       });
 
       // 페이지 로딩 대기
@@ -369,9 +376,9 @@ export class NaverPlaceCrawler {
 
       // 검색 결과에서 상위 업체 추출
       const placeLinks = await page.$$('a[href*="/place/"]');
-      
+
       console.log(`검색 결과: ${placeLinks.length}개 발견`);
-      
+
       for (let i = 0; i < Math.min(count, placeLinks.length); i++) {
         try {
           const href = await placeLinks[i].getAttribute('href');
@@ -380,7 +387,7 @@ export class NaverPlaceCrawler {
             console.log(`경쟁사 ${i + 1} 크롤링 중: ${fullUrl}`);
             const placeData = await this.enrichPlace(fullUrl);
             competitors.push(placeData);
-            
+
             // 과도한 요청 방지
             await page.waitForTimeout(1000);
           }
@@ -391,10 +398,10 @@ export class NaverPlaceCrawler {
 
       await page.close();
       return competitors;
-
     } catch (error) {
       await page.close();
       throw new Error(`경쟁사 검색 실패: ${error}`);
     }
   }
 }
+
