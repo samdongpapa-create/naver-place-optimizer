@@ -53,7 +53,13 @@ export class NaverPlaceCrawler {
 
       await page.waitForTimeout(2000);
 
-      const html = await frame.content();
+      // 🔥 실제 플레이스 데이터 로딩될 때까지 대기
+await frame.waitForFunction(() => {
+  return document.body.innerHTML.includes('"keywordList"');
+}, { timeout: 15000 }).catch(() => {});
+
+const html = await frame.content();
+
 
       // -------------------------
       // 이름
