@@ -1,5 +1,359 @@
-import { chromium, Browser, Frame } from 'playwright';
-import { PlaceData } from '../types';
+import { chromium, Browser, Page } from 'playwright';
+import { CompetitorData, PlaceData } from '../types';
+import { convertToMobileUrl, extractPlaceId } from '../utils/urlHelper';
+
+export type Plan = 'free' | 'pro';
+
+export interface ResolveResult {
+  placeId: string;
+  mobileUrl: string;
+  originalUrl: string;
+}
+
+export interface CrawlDebug {
+  resolved: ResolveResult;
+  staticHits: Record<string, number>;
+  dynamicHits: Record<string, number>;
+  notes: string[];
+}
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function stripHtml(s: string): string {
+  return (s || '').replace(/\s+/g, ' ').trim();
+}
+
+function safeJsonParse(text: string): any | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/** 균형 괄호로 JSON 덩어리 추출 */
+function extractBalancedJson(text: string, startIndex: number): string | null {
+  const startChar = text[startIndex];
+  if (startChar !== '{' && startChar !== '[') return null;
+
+  const stack: string[] = [startChar];
+  let inStr = false;
+  let esc = false;
+
+  for (let i = startIndex + 1; i < text.length; i++) {
+    const c = text[i];
+
+    if (inStr) {
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (c === '\\') {
+        esc = true;
+        continue;
+      }
+      if (c === '"') inStr = false;
+      continue;
+    }
+
+    if (c === '"') {
+      inStr = true;
+      continue;
+    }
+
+    if (c === '{' || c === '[') stack.push(c);
+    if (c === '}' || c === ']') {
+      stack.pop();
+      if (stack.length === 0) return text.slice(startIndex, i + 1);
+    }
+  }
+
+  return null;
+}
+
+function extractScriptTextById(html: string, id: string): string {
+  const re = new RegExp(`<script[^>]*id="${id}"[^>]*>([\\s\\S]*?)<\\/script>`, 'i');
+  const m = html.match(re);
+  return (m?.[1] || '').trim();
+}
+
+function extractJsonAfterMarker(html: string, marker: string): any | null {
+  const idx = html.indexOf(marker);
+  if (idx < 0) return null;
+  const brace = html.indexOf('{', idx);
+  const bracket = html.indexOf('[', idx);
+  const start =
+    brace >= 0 && bracket >= 0 ? Math.min(brace, bracket) : brace >= 0 ? brace : bracket >= 0 ? bracket : -1;
+  if (start < 0) return null;
+  const chunk = extractBalancedJson(html, start);
+  if (!chunk) return null;
+  return safeJsonParse(chunk);
+}
+
+function parseNumber(v: any): number {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v !== 'string') return 0;
+  const cleaned = v.replace(/[^\d]/g, '');
+  return cleaned ? Number(cleaned) : 0;
+}
+
+function scanJson(
+  node: any,
+  acc: {
+    name: string;
+    address: string;
+    description: string;
+    directions: string;
+    keywords: string[];
+    reviewCount: number;
+    photoCount: number;
+    hit: Record<string, number>;
+  }
+) {
+  if (!node) return;
+  if (Array.isArray(node)) {
+    for (const v of node) scanJson(v, acc);
+    return;
+  }
+  if (typeof node !== 'object') return;
+
+  const obj: any = node;
+
+  // name
+  if (!acc.name) {
+    const candidates = [obj.placeName, obj.bizName, obj.name];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim().length > 0 && !c.includes('네이버')) {
+        acc.name = c.trim();
+        acc.hit.name++;
+        break;
+      }
+    }
+  }
+
+  // address
+  if (!acc.address) {
+    const candidates = [obj.roadAddress, obj.jibunAddress, obj.address, obj.fullAddress];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim().length >= 5) {
+        acc.address = c.trim();
+        acc.hit.address++;
+        break;
+      }
+    }
+  }
+
+  // description
+  if (!acc.description) {
+    const candidates = [obj.introduction, obj.description, obj.summary, obj.businessDescription, obj.intro];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim().length >= 15 && !c.includes('네이버페이')) {
+        acc.description = c.trim();
+        acc.hit.description++;
+        break;
+      }
+    }
+  }
+
+  // directions
+  if (!acc.directions) {
+    const candidates = [obj.directions, obj.way, obj.wayDescription, obj.directionDescription];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim().length >= 15) {
+        acc.directions = c.trim();
+        acc.hit.directions++;
+        break;
+      }
+    }
+  }
+
+  // keywordList
+  if (Array.isArray(obj.keywordList) && acc.keywords.length === 0) {
+    const list: string[] = obj.keywordList
+      .map((k: any) => String(k?.text ?? k?.name ?? '').trim())
+      .filter((x: string) => x.length > 0);
+    if (list.length) {
+      acc.keywords = Array.from(new Set(list)).slice(0, 5);
+      acc.hit.keywords++;
+    }
+  }
+
+  // review/photo counts
+  const reviewCandidates = [
+    obj.reviewCount,
+    obj.totalReviewCount,
+    obj.visitorReviewCount,
+    obj.blogReviewCount,
+    obj.reviewsCount,
+    obj.totalReviewsCount
+  ];
+  for (const c of reviewCandidates) {
+    const n = parseNumber(c);
+    if (n > acc.reviewCount) {
+      acc.reviewCount = n;
+      acc.hit.reviewCount++;
+    }
+  }
+
+  const photoCandidates = [obj.photoCount, obj.totalPhotoCount, obj.photosCount, obj.imageCount, obj.totalImageCount];
+  for (const c of photoCandidates) {
+    const n = parseNumber(c);
+    if (n > acc.photoCount) {
+      acc.photoCount = n;
+      acc.hit.photoCount++;
+    }
+  }
+
+  for (const k of Object.keys(obj)) {
+    scanJson(obj[k], acc);
+  }
+}
+
+export function resolvePlace(inputUrl: string): ResolveResult {
+  const placeId = extractPlaceId(inputUrl);
+  if (!placeId) throw new Error('placeId를 URL에서 찾을 수 없습니다. URL을 확인해주세요.');
+  const mobileUrl = convertToMobileUrl(inputUrl);
+  return { placeId, mobileUrl, originalUrl: inputUrl };
+}
+
+export async function fetchPlaceHtml(mobileUrl: string): Promise<string> {
+  const res = await fetch(mobileUrl, {
+    method: 'GET',
+    redirect: 'follow',
+    headers: {
+      'user-agent':
+        'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36',
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'accept-language': 'ko-KR,ko;q=0.9,en;q=0.8'
+    }
+  });
+  if (!res.ok) throw new Error(`HTML fetch 실패: ${res.status}`);
+  return await res.text();
+}
+
+export function parsePlaceFromHtml(html: string): { place: Partial<PlaceData>; hit: Record<string, number>; notes: string[] } {
+  const acc = {
+    name: '',
+    address: '',
+    description: '',
+    directions: '',
+    keywords: [] as string[],
+    reviewCount: 0,
+    photoCount: 0,
+    hit: {
+      name: 0,
+      address: 0,
+      description: 0,
+      directions: 0,
+      keywords: 0,
+      reviewCount: 0,
+      photoCount: 0
+    },
+    notes: [] as string[]
+  };
+
+  // 1) __NEXT_DATA__
+  const nextText = extractScriptTextById(html, '__NEXT_DATA__');
+  if (nextText) {
+    const json = safeJsonParse(nextText);
+    if (json) scanJson(json, acc);
+    else acc.notes.push('__NEXT_DATA__ JSON 파싱 실패');
+  } else {
+    acc.notes.push('__NEXT_DATA__ 없음');
+  }
+
+  // 2) __APOLLO_STATE__
+  if (acc.keywords.length === 0 || !acc.address || !acc.description || acc.photoCount === 0) {
+    const apollo = extractJsonAfterMarker(html, '__APOLLO_STATE__');
+    if (apollo) scanJson(apollo, acc);
+    else acc.notes.push('__APOLLO_STATE__ 없음/파싱 실패');
+  }
+
+  // 3) regex fallback
+  if (!acc.address) {
+    const m = html.match(/"roadAddress"\s*:\s*"([^"]+)"/) || html.match(/"jibunAddress"\s*:\s*"([^"]+)"/);
+    if (m?.[1]) {
+      acc.address = m[1].trim();
+      acc.hit.address++;
+    }
+  }
+  if (!acc.description) {
+    const m =
+      html.match(/"introduction"\s*:\s*"([^"]+)"/) ||
+      html.match(/"description"\s*:\s*"([^"]+)"/) ||
+      html.match(/"summary"\s*:\s*"([^"]+)"/);
+    if (m?.[1]) {
+      const s = m[1].trim();
+      if (!s.includes('네이버페이')) {
+        acc.description = s;
+        acc.hit.description++;
+      }
+    }
+  }
+  if (!acc.directions) {
+    const m =
+      html.match(/"directions"\s*:\s*"([^"]+)"/) ||
+      html.match(/"wayDescription"\s*:\s*"([^"]+)"/) ||
+      html.match(/"way"\s*:\s*"([^"]+)"/);
+    if (m?.[1]) {
+      acc.directions = m[1].trim();
+      acc.hit.directions++;
+    }
+  }
+  if (acc.keywords.length === 0) {
+    const km = html.match(/"keywordList"\s*:\s*\[(.*?)\]/s);
+    if (km?.[1]) {
+      const items = km[1].match(/"text"\s*:\s*"([^"]+)"/g) || [];
+      const list = items
+        .map((x) => x.match(/"text"\s*:\s*"([^"]+)"/)?.[1] || '')
+        .map((x) => x.trim())
+        .filter(Boolean);
+      if (list.length) {
+        acc.keywords = Array.from(new Set(list)).slice(0, 5);
+        acc.hit.keywords++;
+      }
+    }
+  }
+
+  const place: Partial<PlaceData> = {
+    name: acc.name,
+    address: acc.address,
+    description: acc.description,
+    directions: acc.directions,
+    keywords: acc.keywords,
+    reviewCount: acc.reviewCount,
+    photoCount: acc.photoCount
+  };
+
+  return { place, hit: acc.hit, notes: acc.notes };
+}
+
+function mergePlace(base: Partial<PlaceData>, dynamic: Partial<PlaceData>): PlaceData {
+  const name = (dynamic.name || base.name || '').trim();
+  const address = (dynamic.address || base.address || '').trim();
+  const description =
+    (dynamic.description && dynamic.description.length >= (base.description?.length || 0)
+      ? dynamic.description
+      : base.description) || '';
+  const directions =
+    (dynamic.directions && dynamic.directions.length >= (base.directions?.length || 0) ? dynamic.directions : base.directions) ||
+    '';
+  const keywords = (dynamic.keywords && dynamic.keywords.length ? dynamic.keywords : base.keywords) || [];
+  const reviewCount = Math.max(dynamic.reviewCount || 0, base.reviewCount || 0);
+  const photoCount = Math.max(dynamic.photoCount || 0, base.photoCount || 0);
+
+  return {
+    name,
+    address,
+    reviewCount,
+    photoCount,
+    description: stripHtml(description),
+    directions: stripHtml(directions),
+    keywords
+  };
+}
 
 export class NaverPlaceCrawler {
   private browser: Browser | null = null;
@@ -18,363 +372,243 @@ export class NaverPlaceCrawler {
     }
   }
 
-  private parseNumber(input: any): number {
-    if (typeof input === 'number' && Number.isFinite(input)) return input;
-    if (typeof input !== 'string') return 0;
-    const cleaned = input.replace(/[^\d]/g, '');
-    return cleaned ? Number(cleaned) : 0;
-  }
-
-  /** 균형 괄호로 JSON 객체/배열을 잘라내기 */
-  private extractBalancedJson(text: string, startIndex: number): string | null {
-    const startChar = text[startIndex];
-    if (startChar !== '{' && startChar !== '[') return null;
-
-    const stack: string[] = [startChar];
-    let i = startIndex + 1;
-    let inStr = false;
-    let esc = false;
-
-    for (; i < text.length; i++) {
-      const c = text[i];
-
-      if (inStr) {
-        if (esc) {
-          esc = false;
-          continue;
-        }
-        if (c === '\\') {
-          esc = true;
-          continue;
-        }
-        if (c === '"') {
-          inStr = false;
-        }
-        continue;
-      }
-
-      if (c === '"') {
-        inStr = true;
-        continue;
-      }
-
-      if (c === '{' || c === '[') stack.push(c);
-      else if (c === '}' || c === ']') {
-        const last = stack.pop();
-        if (!last) return null;
-        if (stack.length === 0) {
-          return text.slice(startIndex, i + 1);
-        }
-      }
-    }
-    return null;
-  }
-
-  /** script tag에서 특정 id의 JSON 텍스트를 가져오기 */
-  private extractScriptTextById(html: string, id: string): string {
-    const re = new RegExp(`<script[^>]*id="${id}"[^>]*>([\\s\\S]*?)<\\/script>`, 'i');
-    const m = html.match(re);
-    return (m?.[1] || '').trim();
-  }
-
-  /** html 안에서 marker 뒤에 나오는 JSON 객체/배열을 균형괄호로 추출 */
-  private extractJsonAfterMarker(html: string, marker: string): any | null {
-    const idx = html.indexOf(marker);
-    if (idx < 0) return null;
-
-    const braceIdx = html.indexOf('{', idx);
-    const bracketIdx = html.indexOf('[', idx);
-    const startIndex =
-      braceIdx >= 0 && bracketIdx >= 0 ? Math.min(braceIdx, bracketIdx)
-      : braceIdx >= 0 ? braceIdx
-      : bracketIdx >= 0 ? bracketIdx
-      : -1;
-
-    if (startIndex < 0) return null;
-
-    const chunk = this.extractBalancedJson(html, startIndex);
-    if (!chunk) return null;
-
-    try {
-      return JSON.parse(chunk);
-    } catch {
-      return null;
-    }
-  }
-
-  /** JSON을 재귀로 훑어서 필요한 시그널을 모은다 */
-  private scanJson(node: any, acc: {
-    keywords: string[];
-    reviewCount: number;
-    photoCount: number;
-    address: string;
-    description: string;
-    directions: string;
-    hit: Record<string, number>;
-  }) {
-    if (!node) return;
-
-    if (Array.isArray(node)) {
-      for (const v of node) this.scanJson(v, acc);
-      return;
-    }
-
-    if (typeof node === 'object') {
-      // keywordList
-      if (Array.isArray((node as any).keywordList)) {
-        const list = (node as any).keywordList
-          .map((k: any) => String(k?.text ?? k?.name ?? '').trim())
-          .filter((x: string) => x.length > 0);
-        if (list.length && acc.keywords.length === 0) {
-          acc.keywords = Array.from(new Set(list)).slice(0, 5);
-          acc.hit.keywordList++;
-        }
-      }
-
-      // reviewCount 후보
-      const reviewFields = [
-        (node as any).reviewCount,
-        (node as any).totalReviewCount,
-        (node as any).visitorReviewCount,
-        (node as any).blogReviewCount,
-        (node as any).reviewsCount
-      ];
-      for (const v of reviewFields) {
-        const n = this.parseNumber(v);
-        if (n > acc.reviewCount) {
-          acc.reviewCount = n;
-          acc.hit.reviewCount++;
-        }
-      }
-
-      // photoCount 후보
-      const photoFields = [
-        (node as any).photoCount,
-        (node as any).totalPhotoCount,
-        (node as any).photosCount,
-        (node as any).imageCount
-      ];
-      for (const v of photoFields) {
-        const n = this.parseNumber(v);
-        if (n > acc.photoCount) {
-          acc.photoCount = n;
-          acc.hit.photoCount++;
-        }
-      }
-
-      // address 후보
-      if (!acc.address) {
-        const addrFields = [
-          (node as any).roadAddress,
-          (node as any).jibunAddress,
-          (node as any).address,
-          (node as any).fullAddress
-        ];
-        for (const v of addrFields) {
-          if (typeof v === 'string' && v.trim().length >= 5) {
-            acc.address = v.trim();
-            acc.hit.address++;
-            break;
-          }
-        }
-      }
-
-      // description 후보
-      if (!acc.description) {
-        const descFields = [
-          (node as any).introduction,
-          (node as any).description,
-          (node as any).summary,
-          (node as any).businessDescription
-        ];
-        for (const v of descFields) {
-          if (typeof v === 'string' && v.trim().length >= 15) {
-            acc.description = v.trim();
-            acc.hit.description++;
-            break;
-          }
-        }
-      }
-
-      // directions 후보
-      if (!acc.directions) {
-        const dirFields = [
-          (node as any).directions,
-          (node as any).way,
-          (node as any).wayDescription,
-          (node as any).directionDescription
-        ];
-        for (const v of dirFields) {
-          if (typeof v === 'string' && v.trim().length >= 15) {
-            acc.directions = v.trim();
-            acc.hit.directions++;
-            break;
-          }
-        }
-      }
-
-      for (const k of Object.keys(node)) {
-        this.scanJson((node as any)[k], acc);
-      }
-    }
-  }
-
-  private async waitUntilDataReady(frame: Frame): Promise<void> {
-    // TS DOM 타입 회피: globalThis 사용
-    // keywordList 없는 업종 대비해서 roadAddress/reviewCount도 조건 포함
-    await frame.waitForFunction(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const doc = (globalThis as any).document;
-      const html = doc?.body?.innerHTML || '';
-      return html.includes('roadAddress') || html.includes('reviewCount') || html.includes('keywordList');
-    }, { timeout: 20000 }).catch(() => {});
-  }
-
-  async enrichPlace(placeUrl: string): Promise<PlaceData> {
+  private async newMobilePage(): Promise<Page> {
     if (!this.browser) await this.initialize();
     const browser = this.browser;
     if (!browser) throw new Error('브라우저 초기화 실패');
 
-    const page = await browser.newPage();
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      userAgent:
+        'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36',
+      locale: 'ko-KR'
+    });
 
-    try {
-      console.log('페이지 로딩 중...');
-      await page.goto(placeUrl, { waitUntil: 'load', timeout: 60000 });
+    const page = await context.newPage();
 
-      console.log('iframe 대기 중...');
-      await page.waitForSelector('iframe#entryIframe', { timeout: 30000 });
+    // 속도 최적화: 이미지/폰트/미디어 차단
+    await page.route('**/*', async (route: any) => {
+      const r = route.request();
+      const type = r.resourceType();
+      if (type === 'image' || type === 'media' || type === 'font') return route.abort();
+      return route.continue();
+    });
 
-      const frameEl = await page.$('iframe#entryIframe');
-      const frame = frameEl ? await frameEl.contentFrame() : null;
-      if (!frame) throw new Error('entryIframe 로드 실패');
+    return page;
+  }
 
-      await this.waitUntilDataReady(frame);
-
-      // iframe 전체 HTML을 안전하게 가져오기(outerHTML)
-      const iframeHtml: string = await frame.evaluate(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const doc = (globalThis as any).document;
-        return doc?.documentElement?.outerHTML || '';
-      });
-
-      // 1) __NEXT_DATA__ 우선
-      const acc = {
-        keywords: [] as string[],
-        reviewCount: 0,
-        photoCount: 0,
-        address: '',
-        description: '',
-        directions: '',
-        hit: { keywordList: 0, reviewCount: 0, photoCount: 0, address: 0, description: 0, directions: 0 }
-      };
-
-      const nextDataText = this.extractScriptTextById(iframeHtml, '__NEXT_DATA__');
-      if (nextDataText) {
-        try {
-          const json = JSON.parse(nextDataText);
-          this.scanJson(json, acc);
-          console.log('DEBUG: __NEXT_DATA__ scan hit:', acc.hit);
-        } catch {}
+  private async clickIfExists(page: Page, selectors: string[]): Promise<boolean> {
+    for (const sel of selectors) {
+      const el = await page.$(sel).catch(() => null);
+      if (el) {
+        await el.click({ timeout: 1500 }).catch(() => {});
+        await sleep(600);
+        return true;
       }
+    }
+    return false;
+  }
 
-      // 2) __APOLLO_STATE__ / GraphQL 캐시 형태 시도
-      if (
-        acc.keywords.length === 0 ||
-        !acc.address ||
-        acc.photoCount === 0 ||
-        !acc.description ||
-        !acc.directions
-      ) {
-        // window.__APOLLO_STATE__ = {...}
-        const apolloJson = this.extractJsonAfterMarker(iframeHtml, '__APOLLO_STATE__');
-        if (apolloJson) {
-          this.scanJson(apolloJson, acc);
-          console.log('DEBUG: __APOLLO_STATE__ scan hit:', acc.hit);
-        }
-      }
-
-      // 3) 마지막 fallback: 문자열 정규식(정말 최후)
-      const titleText = await frame.title().catch(() => '');
-      let name = titleText.replace(' : 네이버', '').trim();
-
-      // placeName/bizName 정규식
-      if (!name || name.includes('네이버')) {
-        const m =
-          iframeHtml.match(/"placeName"\s*:\s*"([^"]+)"/) ||
-          iframeHtml.match(/"bizName"\s*:\s*"([^"]+)"/);
-        if (m?.[1]) name = m[1].trim();
-      }
-
-      if (!acc.address) {
-        const m =
-          iframeHtml.match(/"roadAddress"\s*:\s*"([^"]+)"/) ||
-          iframeHtml.match(/"jibunAddress"\s*:\s*"([^"]+)"/);
-        if (m?.[1]) acc.address = m[1].trim();
-      }
-
-      if (!acc.description) {
-        const m =
-          iframeHtml.match(/"introduction"\s*:\s*"([^"]+)"/) ||
-          iframeHtml.match(/"description"\s*:\s*"([^"]+)"/);
-        if (m?.[1]) acc.description = m[1].trim();
-      }
-
-      if (!acc.directions) {
-        const m =
-          iframeHtml.match(/"directions"\s*:\s*"([^"]+)"/) ||
-          iframeHtml.match(/"wayDescription"\s*:\s*"([^"]+)"/);
-        if (m?.[1]) acc.directions = m[1].trim();
-      }
-
-      if (acc.keywords.length === 0) {
-        const km = iframeHtml.match(/"keywordList"\s*:\s*\[(.*?)\]/s);
-        if (km?.[1]) {
-          const items = km[1].match(/"text"\s*:\s*"([^"]+)"/g) || [];
-          const list = items
-            .map(x => x.match(/"text"\s*:\s*"([^"]+)"/)?.[1] || '')
-            .map(s => s.trim())
-            .filter(Boolean);
-          if (list.length) acc.keywords = Array.from(new Set(list)).slice(0, 5);
-        }
-      }
-
-      // 리뷰/사진 fallback
-      if (acc.reviewCount === 0) {
-        const m = iframeHtml.match(/방문자리뷰\s*([0-9,]+)/);
-        if (m?.[1]) acc.reviewCount = this.parseNumber(m[1]);
-      }
-      if (acc.photoCount === 0) {
-        const m = iframeHtml.match(/사진\s*([0-9,]+)/);
-        if (m?.[1]) acc.photoCount = this.parseNumber(m[1]);
-      }
-
-      await page.close();
-
-      console.log('DEBUG: FINAL hit:', acc.hit);
-
-      const result: PlaceData = {
-        name: name || '',
-        address: acc.address || '',
-        reviewCount: acc.reviewCount || 0,
-        photoCount: acc.photoCount || 0,
-        description: acc.description || '',
-        directions: acc.directions || '',
-        keywords: acc.keywords || []
-      };
-
-      console.log('✅ 최종 결과:', result);
-      return result;
-
-    } catch (error: any) {
-      try { await page.close(); } catch {}
-      console.error('❌ 크롤링 오류:', error);
-      throw new Error(`플레이스 정보 추출 실패: ${error?.message || error}`);
+  private async clickMoreButtons(page: Page, maxClicks: number = 6) {
+    for (let i = 0; i < maxClicks; i++) {
+      const btn =
+        (await page.$('button:has-text("더보기")').catch(() => null)) || (await page.$('a:has-text("더보기")').catch(() => null));
+      if (!btn) break;
+      await btn.click().catch(() => {});
+      await sleep(500);
     }
   }
 
-  // MVP 단계: 일단 빈 배열
-  async searchCompetitors(_query: string, _count: number = 5): Promise<PlaceData[]> {
-    return [];
+  /**
+   * 동적 보강: 소개/오시는길/대표키워드/사진수 보강
+   */
+  private async enrichDynamic(
+    mobileUrl: string
+  ): Promise<{ place: Partial<PlaceData>; hit: Record<string, number> }> {
+    const page = await this.newMobilePage();
+    const hit = { description: 0, directions: 0, keywords: 0, photoCount: 0, address: 0, name: 0, reviewCount: 0 };
+
+    try {
+      await page.goto(mobileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await sleep(1200);
+
+      // 스크롤 몇 번
+      for (let i = 0; i < 4; i++) {
+        await page.mouse.wheel(0, 900).catch(() => {});
+        await sleep(500);
+      }
+
+      // 정보 탭 클릭
+      await this.clickIfExists(page, ['a:has-text("정보")', 'button:has-text("정보")', 'a:has-text("홈")']);
+
+      // 더보기 연타
+      await this.clickMoreButtons(page, 8);
+
+      // 이름
+      const name =
+        (await page.textContent('h1').catch(() => ''))?.trim() ||
+        (await page.textContent('.Fc1rA').catch(() => ''))?.trim() ||
+        '';
+      if (name) hit.name++;
+
+      // 주소(보이는 텍스트로 한번)
+      let address = ((await page.textContent('.LDgIH').catch(() => '')) || '').trim();
+      if (address) hit.address++;
+
+      // 소개/상세설명(긴 텍스트 블럭)
+      const descCandidates =
+        ((await page
+          .$$eval('div, p, span', (els: any[]) => {
+            const out: string[] = [];
+            for (const el of els as any[]) {
+              const t = (el?.textContent || '').trim();
+              if (t.length >= 40) out.push(t);
+            }
+            return out.slice(0, 200);
+          })
+          .catch(() => [])) as string[]) || [];
+      const description = descCandidates.sort((a: string, b: string) => b.length - a.length)[0] || '';
+      if (description) hit.description++;
+
+      // 오시는길 탭 클릭 후 텍스트 수집
+      await this.clickIfExists(page, ['a:has-text("오시는길")', 'button:has-text("오시는길")', 'a:has-text("길찾기")']);
+      await this.clickMoreButtons(page, 4);
+
+      const dirCandidates =
+        ((await page
+          .$$eval('div, p, span', (els: any[]) => {
+            const out: string[] = [];
+            for (const el of els as any[]) {
+              const t = (el?.textContent || '').trim();
+              if (
+                t.length >= 20 &&
+                (t.includes('주차') || t.includes('출구') || t.includes('도보') || t.includes('버스') || t.includes('지하철'))
+              ) {
+                out.push(t);
+              }
+            }
+            return out.slice(0, 200);
+          })
+          .catch(() => [])) as string[]) || [];
+      const directions = dirCandidates.sort((a: string, b: string) => b.length - a.length)[0] || '';
+      if (directions) hit.directions++;
+
+      // 대표키워드: HTML에 keywordList가 있으면 regex 파싱
+      const html = await page.content();
+      let keywords: string[] = [];
+      const km = html.match(/"keywordList"\s*:\s*\[(.*?)\]/s);
+      if (km?.[1]) {
+        const items = km[1].match(/"text"\s*:\s*"([^"]+)"/g) || [];
+        const list = items
+          .map((x) => x.match(/"text"\s*:\s*"([^"]+)"/)?.[1] || '')
+          .map((x) => x.trim())
+          .filter(Boolean);
+        keywords = Array.from(new Set(list)).slice(0, 5);
+      }
+      if (keywords.length) hit.keywords++;
+
+      // 리뷰/사진: HTML에서 숫자 파싱
+      let reviewCount = 0;
+      let photoCount = 0;
+      const rm = html.match(/"reviewCount"\s*:\s*(\d+)/) || html.match(/방문자리뷰\s*([0-9,]+)/);
+      if (rm?.[1]) reviewCount = parseNumber(rm[1]);
+      const pm = html.match(/"photoCount"\s*:\s*(\d+)/) || html.match(/사진\s*([0-9,]+)/);
+      if (pm?.[1]) photoCount = parseNumber(pm[1]);
+      if (reviewCount) hit.reviewCount++;
+      if (photoCount) hit.photoCount++;
+
+      await page.context().close();
+
+      return {
+        place: {
+          name,
+          address,
+          description,
+          directions,
+          keywords,
+          reviewCount,
+          photoCount
+        },
+        hit
+      };
+    } catch {
+      await page.context().close().catch(() => {});
+      return { place: {}, hit };
+    }
+  }
+
+  async enrichPlace(inputUrlOrMobileUrl: string): Promise<{ place: PlaceData; debug: CrawlDebug }> {
+    const resolved = resolvePlace(inputUrlOrMobileUrl);
+    const debug: CrawlDebug = {
+      resolved,
+      staticHits: { name: 0, address: 0, description: 0, directions: 0, keywords: 0, reviewCount: 0, photoCount: 0 },
+      dynamicHits: { name: 0, address: 0, description: 0, directions: 0, keywords: 0, reviewCount: 0, photoCount: 0 },
+      notes: []
+    };
+
+    // 1) static
+    const html = await fetchPlaceHtml(resolved.mobileUrl);
+    const parsed = parsePlaceFromHtml(html);
+    debug.staticHits = parsed.hit;
+    debug.notes.push(...parsed.notes);
+
+    // 2) dynamic 보강
+    const dyn = await this.enrichDynamic(resolved.mobileUrl);
+    debug.dynamicHits = dyn.hit;
+
+    // merge
+    const place = mergePlace(parsed.place, dyn.place);
+    return { place, debug };
+  }
+
+  /**
+   * 경쟁사: 검색 페이지에서 place 링크만 뽑아 competitor 키워드/리뷰를 빠르게 추출
+   * (MVP: 안정성 우선, 실패 시 빈 배열)
+   */
+  async searchCompetitors(searchQuery: string, limit: number = 5): Promise<CompetitorData[]> {
+    const page = await this.newMobilePage();
+    try {
+      const url = `https://m.place.naver.com/search?query=${encodeURIComponent(searchQuery)}`;
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await sleep(1500);
+
+      const links =
+        ((await page
+          .$$eval('a[href*="/place/"]', (as: any[]) => {
+            const out: string[] = [];
+            for (const a of as as any[]) {
+              const href = a.getAttribute('href') || '';
+              if (!href) continue;
+              if (!href.includes('/place/')) continue;
+              out.push(href.startsWith('http') ? href : `https://m.place.naver.com${href}`);
+            }
+            return Array.from(new Set(out)).slice(0, 30);
+          })
+          .catch(() => [])) as string[]) || [];
+
+      const picked = links.slice(0, limit);
+      await page.context().close();
+
+      const out: CompetitorData[] = [];
+      for (const l of picked) {
+        try {
+          const html = await fetchPlaceHtml(l);
+          const parsed = parsePlaceFromHtml(html).place;
+          out.push({
+            name: parsed.name || '',
+            address: parsed.address || '',
+            keywords: parsed.keywords || [],
+            reviewCount: parsed.reviewCount || 0,
+            photoCount: parsed.photoCount || 0
+          });
+        } catch {
+          // skip
+        }
+      }
+      return out;
+    } catch {
+      await page.context().close().catch(() => {});
+      return [];
+    }
   }
 }
-
