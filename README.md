@@ -70,7 +70,23 @@ Railway 대시보드에서 설정:
 - `PORT`: 자동 설정됨 (Railway가 자동 할당)
 - `NODE_ENV`: `production`
 
-## 📁 프로젝트 구조
+## 📝 사용 방법
+
+이제 다양한 URL 형식을 지원합니다:
+
+```
+✅ https://m.place.naver.com/restaurant/1234567890
+✅ https://place.naver.com/restaurant/1234567890
+✅ https://map.naver.com/v5/entry/place/1234567890
+✅ https://map.naver.com/p/entry/place/1443688242  ← 이런 형식도 OK!
+✅ https://naver.me/xxxxx (단축 URL)
+```
+
+**실제 테스트 URL:**
+```
+https://map.naver.com/p/entry/place/1443688242
+→ 자동 변환: https://m.place.naver.com/place/1443688242
+```
 
 ```
 naver-place-optimizer/

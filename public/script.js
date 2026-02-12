@@ -4,6 +4,61 @@ const API_BASE = window.location.origin;
 // 현재 플레이스 URL 저장
 let currentPlaceUrl = '';
 
+// URL 변환 함수 (프론트엔드)
+function convertToMobileUrl(url) {
+    try {
+        if (!url) return '';
+        
+        const urlObj = new URL(url);
+        
+        // 이미 모바일 URL인 경우
+        if (urlObj.hostname === 'm.place.naver.com') {
+            return url;
+        }
+        
+        // place ID 추출
+        let placeId = null;
+        
+        // 1. /entry/place/1234567 형식
+        const entryMatch = url.match(/\/entry\/place\/(\d+)/);
+        if (entryMatch && entryMatch[1]) {
+            placeId = entryMatch[1];
+        }
+        
+        // 2. place.naver.com/xxx/1234567
+        if (!placeId) {
+            const placeMatch = url.match(/place\.naver\.com\/[^/]+\/(\d+)/);
+            if (placeMatch && placeMatch[1]) {
+                placeId = placeMatch[1];
+            }
+        }
+        
+        // 3. ?place=1234567
+        if (!placeId) {
+            const paramMatch = url.match(/[?&]place=(\d+)/);
+            if (paramMatch && paramMatch[1]) {
+                placeId = paramMatch[1];
+            }
+        }
+        
+        // 4. 일반 숫자
+        if (!placeId) {
+            const numberMatch = url.match(/(\d{7,})/);
+            if (numberMatch && numberMatch[1]) {
+                placeId = numberMatch[1];
+            }
+        }
+        
+        if (placeId) {
+            return `https://m.place.naver.com/place/${placeId}`;
+        }
+        
+        return url;
+    } catch (error) {
+        return url;
+    }
+}
+
 // 섹션 표시 함수
 function showSection(sectionId) {
     const sections = ['inputSection', 'loadingSection', 'reportSection', 'errorSection'];

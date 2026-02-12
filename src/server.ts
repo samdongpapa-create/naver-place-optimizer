@@ -44,25 +44,37 @@ app.post('/api/diagnose/free', async (req: Request, res: Response) => {
       return res.status(400).json({ error: '플레이스 URL을 입력해주세요' });
     }
 
+    console.log('📥 원본 URL:', placeUrl);
+
     // URL 검증
     if (!isValidPlaceUrl(placeUrl)) {
       return res.status(400).json({ 
         error: '올바른 네이버 플레이스 URL을 입력해주세요',
-        message: '예시: https://m.place.naver.com/restaurant/1234567890'
+        message: '예시: https://map.naver.com/p/entry/place/1234567890'
       });
     }
 
     // 모바일 URL로 변환
     placeUrl = convertToMobileUrl(placeUrl);
-    console.log('변환된 URL:', placeUrl);
+    console.log('🔄 변환된 URL:', placeUrl);
 
     // 플레이스 정보 크롤링
-    console.log('🔍 플레이스 정보 수집 중:', placeUrl);
+    console.log('🔍 플레이스 정보 수집 시작...');
     const placeData = await crawler.enrichPlace(placeUrl);
+    
+    console.log('✅ 수집 완료:');
+    console.log('  - 이름:', placeData.name);
+    console.log('  - 주소:', placeData.address);
+    console.log('  - 리뷰:', placeData.reviewCount);
+    console.log('  - 사진:', placeData.photoCount);
+    console.log('  - 설명 길이:', placeData.description.length);
+    console.log('  - 오시는길 길이:', placeData.directions.length);
+    console.log('  - 키워드:', placeData.keywords);
 
     // 진단 실행
-    console.log('📊 진단 중...');
+    console.log('📊 진단 시작...');
     const diagnosis = diagnosisService.generateDiagnosis(placeData, false);
+    console.log('✅ 진단 완료');
 
     res.json({
       success: true,
@@ -70,10 +82,22 @@ app.post('/api/diagnose/free', async (req: Request, res: Response) => {
     });
 
   } catch (error: any) {
-    console.error('진단 오류:', error);
+    console.error('❌ 진단 오류:', error);
+    
+    let errorMessage = '진단 중 오류가 발생했습니다.';
+    
+    if (error.message.includes('iframe')) {
+      errorMessage = '페이지 로딩에 실패했습니다. URL을 다시 확인해주세요.';
+    } else if (error.message.includes('Timeout')) {
+      errorMessage = '페이지 로딩 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.';
+    } else if (error.message.includes('navigation')) {
+      errorMessage = '네이버 플레이스 페이지에 접근할 수 없습니다. URL을 확인해주세요.';
+    }
+    
     res.status(500).json({ 
-      error: '진단 중 오류가 발생했습니다',
-      message: error.message 
+      error: errorMessage,
+      message: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });

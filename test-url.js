@@ -1,7 +1,5 @@
-/**
- * 네이버 플레이스 URL을 모바일 버전으로 변환
- */
-export function convertToMobileUrl(url: string): string {
+// URL 변환 테스트
+function convertToMobileUrl(url) {
   try {
     const urlObj = new URL(url);
     
@@ -53,51 +51,11 @@ export function convertToMobileUrl(url: string): string {
   }
 }
 
-/**
- * 네이버 플레이스 URL 검증
- */
-export function isValidPlaceUrl(url: string): boolean {
-  try {
-    const urlObj = new URL(url);
-    
-    // 허용되는 호스트
-    const validHosts = [
-      'm.place.naver.com',
-      'place.naver.com',
-      'map.naver.com',
-      'naver.me'
-    ];
-    
-    if (!validHosts.includes(urlObj.hostname)) {
-      return false;
-    }
-    
-    // place ID가 포함되어 있는지 확인 (7자리 이상 숫자)
-    return /\d{7,}/.test(url);
-  } catch (error) {
-    return false;
-  }
-}
+// 테스트
+const testUrl = 'https://map.naver.com/p/entry/place/1443688242';
+const converted = convertToMobileUrl(testUrl);
 
-/**
- * URL에서 Place ID 추출
- */
-export function extractPlaceId(url: string): string | null {
-  // 여러 패턴 시도
-  const patterns = [
-    /\/entry\/place\/(\d+)/,
-    /place\.naver\.com\/[^/]+\/(\d+)/,
-    /m\.place\.naver\.com\/[^/]+\/(\d+)/,
-    /[?&]place=(\d+)/,
-    /(\d{7,})/
-  ];
-  
-  for (const pattern of patterns) {
-    const match = url.match(pattern);
-    if (match && match[1]) {
-      return match[1];
-    }
-  }
-  
-  return null;
-}
+console.log('원본 URL:', testUrl);
+console.log('변환된 URL:', converted);
+console.log('예상 결과:', 'https://m.place.naver.com/place/1443688242');
+console.log('일치 여부:', converted === 'https://m.place.naver.com/place/1443688242');
