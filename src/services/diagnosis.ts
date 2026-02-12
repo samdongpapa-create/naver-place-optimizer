@@ -3,11 +3,16 @@ import { PlaceData } from '../types';
 export interface DiagnosisResult {
   totalScore: number;
   grade: string;
+
   detail: DiagnosisItem;
   directions: DiagnosisItem;
   keywords: DiagnosisItem;
   review: DiagnosisItem;
   photo: DiagnosisItem;
+
+  // ✅ server.ts에서 result.competitors를 쓰는 케이스 호환
+  competitors: PlaceData[];
+
   improvements: ImprovementResult;
 }
 
@@ -27,16 +32,17 @@ interface ImprovementResult {
 
 export class PlaceDiagnosisService {
   /**
-   * ✅ 기존 코드 호환용 메서드 (server.ts가 generateDiagnosis를 호출하는 경우)
+   * ✅ 기존 server.ts 호환:
+   * generateDiagnosis(place, competitors) 형태로 호출해도 에러 안 나게.
    */
-  generateDiagnosis(place: PlaceData): DiagnosisResult {
-    return this.diagnose(place);
+  generateDiagnosis(place: PlaceData, competitors: PlaceData[] = []): DiagnosisResult {
+    return this.diagnose(place, competitors);
   }
 
   /**
-   * 신규 표준 진단 메서드
+   * 신규 표준 메서드
    */
-  diagnose(place: PlaceData): DiagnosisResult {
+  diagnose(place: PlaceData, competitors: PlaceData[] = []): DiagnosisResult {
     const detail = this.evaluateDescription(place.description);
     const directions = this.evaluateDirections(place.directions);
     const keywords = this.evaluateKeywords(place.keywords);
@@ -55,7 +61,8 @@ export class PlaceDiagnosisService {
       keywords,
       review,
       photo,
-      improvements: this.generateImprovements(place)
+      competitors: competitors || [],
+      improvements: this.generateImprovements(place, competitors || [])
     };
   }
 
@@ -168,13 +175,13 @@ export class PlaceDiagnosisService {
   // 개선안 생성 로직
   // =============================
 
-  private generateImprovements(place: PlaceData): ImprovementResult {
+  private generateImprovements(place: PlaceData, competitors: PlaceData[]): ImprovementResult {
     return {
       descriptionImprovement: this.buildDescriptionImprovement(place),
       directionsImprovement: this.buildDirectionsImprovement(place),
       reviewGuide: this.buildReviewGuide(place),
       recommendedKeywords: this.generateRecommendedKeywords(place),
-      competitorKeywordSuggestion: this.generateCompetitorKeywordSuggestion(place)
+      competitorKeywordSuggestion: this.generateCompetitorKeywordSuggestion(place, competitors)
     };
   }
 
@@ -199,7 +206,7 @@ export class PlaceDiagnosisService {
 ※ 상세설명은 200자 이상 작성하고, “지역/역명 + 업종/서비스” 키워드를 자연스럽게 포함하면 노출에 도움이 됩니다.`;
   }
 
-  private buildDirectionsImprovement(place: PlaceData): string {
+  private buildDirectionsImprovement(_: PlaceData): string {
     return `📍 지하철 이용 시
 - 가까운 역/출구 기준으로 도보 시간(예: 3~7분)을 명확히 작성
 
@@ -213,12 +220,12 @@ export class PlaceDiagnosisService {
 ※ 오시는길은 “숫자/기준점(출구, 정류장, 건물명)”이 들어갈수록 예약 전환율이 확 올라갑니다.`;
   }
 
-  private buildReviewGuide(place: PlaceData): string {
+  private buildReviewGuide(_: PlaceData): string {
     return `1️⃣ 리뷰 유도(현장 멘트)
 - “오늘 만족하셨다면 리뷰 한 줄만 부탁드려요! 사진까지 올려주시면 더 큰 도움이 돼요 😊”
 
 2️⃣ 리뷰 요청 타이밍
-- 결제 직후 + 시술 직후(거울 확인 후) 2번 중 1번만 선택
+- 결제 직후 + 시술 직후(거울 확인 후) 중 1회
 
 3️⃣ 답글 템플릿
 - “소중한 리뷰 감사합니다 😊 다음 방문에도 더 만족드리겠습니다!”
@@ -243,16 +250,37 @@ export class PlaceDiagnosisService {
     ];
   }
 
-  private generateCompetitorKeywordSuggestion(place: PlaceData): string[] {
-    if (place.keywords && place.keywords.length > 0) {
-      return place.keywords.slice(0, 5);
+  private generateCompetitorKeywordSuggestion(place: PlaceData, competitors: PlaceData[]): string[] {
+    // 경쟁사 키워드가 있으면 거기서 많이 등장하는 것 위주로 추천
+    const pool: string[] = [];
+
+    for (const c of competitors || []) {
+      for (const k of c.keywords || []) pool.push(k);
     }
 
-    return ['맛집', '추천', '인기', '핫플', '가성비'];
+    // 내 키워드도 조금 섞어서 빈값 방지
+    for (const k of place.keywords || []) pool.push(k);
+
+    const freq = new Map<string, number>();
+    for (const k of pool) {
+      const key = (k || '').trim();
+      if (!key) continue;
+      freq.set(key, (freq.get(key) || 0) + 1);
+    }
+
+    const sorted = Array.from(freq.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([k]) => k);
+
+    if (sorted.length >= 5) return sorted.slice(0, 5);
+
+    // fallback
+    const fallback = ['맛집', '추천', '인기', '핫플', '가성비'];
+    return Array.from(new Set([...sorted, ...fallback])).slice(0, 5);
   }
 }
 
 /**
- * ✅ 예전 코드 호환용 export (혹시 server.ts가 DiagnosisService를 import하는 경우 대비)
+ * ✅ 예전 코드 호환용 export (server.ts가 DiagnosisService를 import할 수도 있음)
  */
 export const DiagnosisService = PlaceDiagnosisService;
